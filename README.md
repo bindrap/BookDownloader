@@ -2,13 +2,25 @@
 
 A unified tool for downloading books and manga legally from free sources.
 
+## ⚠️ Network Requirements
+
+| Feature | Work/School | Home | Mobile Hotspot |
+|---------|-------------|------|----------------|
+| **Manga Search** | ❌ Blocked | ✅ Works | ✅ Works |
+| **Manga Download** | ❌ Blocked | ✅ Works | ✅ Works |
+| **Book Search** | ✅ Works | ✅ Works | ✅ Works |
+| **Project Gutenberg** | ✅ Usually Works | ✅ Works | ✅ Works |
+| **Internet Archive** | ❌ Often Blocked | ✅ Works | ✅ Works |
+
+**TL;DR**: Use this tool at home for best results. Most features are blocked on corporate/school networks.
+
 ## Quick Start
 
 ### Installation
 
 ```bash
 # Install Python dependencies
-pip install requests rich
+pip install requests rich beautifulsoup4
 ```
 
 ### Universal Downloader (Recommended)
@@ -22,10 +34,13 @@ python3 downloader.py
 # Download a book
 python3 downloader.py --book "Pride and Prejudice"
 
+# Search for manga by title (NEW!)
+python3 downloader.py --manga --search "one punch man"
+
 # Download manga (interactive)
 python3 downloader.py --manga
 
-# Download manga (direct)
+# Download manga (direct URL)
 python3 downloader.py --manga --url https://mangadex.org/title/XXXXX/one-piece --chapters 1-10
 
 # List supported manga sites
@@ -37,10 +52,11 @@ python3 downloader.py --manga --list
 - **Single unified interface** for both books and manga
 - **Interactive mode** - no need to remember commands
 - **Book search** from Project Gutenberg and Internet Archive
-- **Manga download** from 18+ supported sites
+- **Manga search** - NEW! Search across 19+ sites by title
+- **Manga download** from 19+ supported sites including NatoManga
 - **Smart formatting** with rich colors and progress bars
 - **Multiple formats** - EPUB, PDF, TXT for books; CBZ for manga
-- **Language filtering** - Specify language code to download only one translation (recommended: use `--language en`)
+- **English-only mode** - Downloads all languages but keeps only English versions
 - **Validated file extensions** - Ensures books download with correct formats (.epub, .pdf, etc.)
 
 ## Contents
@@ -70,7 +86,11 @@ python3 downloader.py --book "The Great Gatsby"
 ### Manga
 
 ```bash
-# Interactive mode (easiest)
+# NEW! Search for manga by title across all sites
+python3 downloader.py --manga --search "one punch man"
+python3 downloader.py --manga --search "attack on titan"
+
+# Interactive mode (easiest - now includes search option)
 python3 downloader.py --manga
 
 # Direct download with chapter range
@@ -85,8 +105,8 @@ python3 downloader.py --manga --url [URL] --chapters 1-10 --bundle
 # Download in specific language
 python3 downloader.py --manga --url [URL] --chapters 1-10 --language es
 
-# Download with all options
-python3 downloader.py --manga --url [URL] --chapters 1-50 --bundle --language en
+# English-only mode (downloads all, keeps only English)
+python3 downloader.py --manga --url [URL] --chapters 1-10 --english-only
 ```
 
 ## Supported Manga Sites
@@ -94,17 +114,18 @@ python3 downloader.py --manga --url [URL] --chapters 1-50 --bundle --language en
 **Note**: Manga sites frequently change their structure and APIs, which can cause download issues. The manga-downloader tool is actively maintained, but some sites may temporarily not work.
 
 - Asura Scans (asuratoon.com)
-- Chapmanganato (chapmanganato.to)
+- Chapmanganato (chapmanganato.to) - *Search enabled*
 - InManga (inmanga.com)
 - LHTranslation (lhtranslation.net)
 - LSComic (lscomic.com)
 - Manga Monks (mangamonks.com)
 - MangaBat (mangabat.com)
-- **MangaDex (mangadex.org)** ✅ *Confirmed working - use `--language` to filter*
-- Mangakakalot (mangakakalot.com, mangakakalot.tv)
-- Manganato (manganato.com)
+- **MangaDex (mangadex.org)** ✅ *Confirmed working - Search enabled via API*
+- Mangakakalot (mangakakalot.com, mangakakalot.tv) - *Search enabled*
+- Manganato (manganato.com) - *Search enabled*
 - Manganelo (manganelo.com, manganelo.tv)
 - MangaPanda (mangapanda.in)
+- **NatoManga (natomanga.com)** 🆕 *Newly added - Search enabled*
 - ReadMangaBat (readmangabat.com)
 - TCB Scans (tcbscans.com, tcbscans.net, tcbscans.org)
 
@@ -113,13 +134,53 @@ To see this list anytime, run:
 python3 downloader.py --manga --list
 ```
 
+### Manga Search Feature (NEW!)
+
+The new search feature lets you search for manga by title across all supported sites simultaneously. Instead of manually browsing sites or knowing the exact URL, just search by title!
+
+**How it works:**
+1. Searches 5 major sites with search support (MangaDex, Manganato, Mangakakalot, Chapmanganato, NatoManga)
+2. Shows you all results in a nice table format
+3. Lets you choose which one to download
+4. Shows which sites succeeded, failed, or were blocked
+
+**Example:**
+```bash
+python3 downloader.py --manga --search "one punch man"
+```
+
+**⚠️ IMPORTANT - Network Restrictions:**
+- **Corporate/Work Networks**: Most manga sites will be BLOCKED by firewalls
+  - You'll see "blocked/unreachable" errors for most sites
+  - Search will return 0 results even though the feature works correctly
+  - **Recommendation**: Use this feature at home or on mobile hotspot
+- **School Networks**: Similar restrictions apply
+- **Home Networks**: Should work without issues
+- **If blocked**: Use `--url` method if you already have a direct manga URL
+
 ### Known Issues with Manga Sites
+
+**Network Blocking**: Some networks (work, school, public WiFi) may block manga sites. If search returns no results, check the error messages to see which sites were blocked. You can try:
+- Using a different network (home, mobile hotspot)
+- Using the `--url` method if you have a direct link
+- Using a VPN (if allowed by your network policy)
 
 **MangaDex**: Works correctly! The downloader will fetch all available languages unless you specify `--language en` (or another code). If you get "no chapters found" or 404 errors, the manga might not have the language you requested available.
 
 **Site Availability**: Manga sites frequently go down, change URLs, or implement anti-scraping measures. If one site doesn't work, try an alternative site for the same manga.
 
 ## Recent Improvements
+
+### v2.0 - Manga Search Feature (Latest!)
+**Added**: Cross-site manga search functionality
+- Search for manga by title across multiple sites simultaneously
+- Interactive selection from search results
+- Clear feedback on which sites succeeded, failed, or were blocked
+- Added NatoManga support
+- Improved error handling and network resilience
+- Default to English-only downloads in interactive mode
+
+**Dependency**: Requires `beautifulsoup4` - install with `pip install beautifulsoup4`
 
 ### Language Filtering (Manga) - Important Change!
 **The Situation**: Many manga sites (especially MangaDex) host the same chapters in multiple languages. When you don't specify a language, the downloader will grab ALL available translations (Spanish, Turkish, Russian, Arabic, Chinese, etc.), creating dozens of files.
@@ -160,19 +221,39 @@ python3 downloader.py --manga --url [URL] --chapters 1-10 --language ja
 
 ## Tips
 
+### Network Recommendations
+
+**🏢 At Work/School:**
+- ❌ Manga search will likely NOT work (most sites blocked)
+- ❌ Internet Archive downloads may fail (401 errors)
+- ✅ Project Gutenberg books may work
+- **Best practice**: Don't use this tool at work - save it for home
+
+**🏠 At Home:**
+- ✅ All features work perfectly
+- ✅ Manga search across all sites
+- ✅ Both book sources work
+- **Best practice**: This is where you should use the tool
+
+**📱 On Mobile Hotspot:**
+- ✅ Should work like home network
+- Good alternative if you need to download something urgently
+
 ### For Books
 - Be specific with book titles for better search results
 - Classic literature works best (public domain)
 - Check both sources as they may have different formats available
 - Downloaded files will have validated extensions (.epub, .pdf, .txt)
+- **If at work**: Stick to Project Gutenberg - Internet Archive often blocked
 
 ### For Manga
+- **⚠️ USE AT HOME**: Corporate networks block most manga sites
+- Use the new search feature to find manga across multiple sites
 - Always use the series URL, not a chapter URL
-- **⚠️ IMPORTANT**: Use `--language en` to download only English (otherwise ALL languages will download)
+- Interactive mode defaults to English-only downloads
 - Use `--bundle` to combine chapters into a single CBZ file
 - Downloads are saved in CBZ format, readable with most comic readers
-- To avoid downloading dozens of duplicate files, ALWAYS specify `--language [code]`
-- **MangaDex works!** - It downloads successfully, just specify a language or accept all languages
+- **MangaDex works great at home** - Has the most reliable API
 - **Manga site changes**: Sites frequently change URLs and structure. If downloads fail, try:
   1. A different site hosting the same manga
   2. Updating the manga-downloader binary (see Updates section)
@@ -208,14 +289,30 @@ pip install requests rich
 **Book: Download failed**
 - The file might be temporarily unavailable, try again later
 
+**Book: 401 Unauthorized error from Internet Archive**
+- This is caused by network restrictions (common at work/school)
+- Corporate firewalls often block direct downloads from archive.org
+- **Solutions**:
+  - Try at home or on a different network
+  - Try Project Gutenberg books instead (they often work better through firewalls)
+  - Example: `python3 downloader.py --book "Pride and Prejudice"`
+  - Project Gutenberg specializes in classic public domain literature
+
 **Manga: Binary not found**
 - Make sure you're in the BookDownloader directory when running scripts
+
+**Manga: Search returns no results**
+- Check if your network is blocking manga sites (common at work/school)
+- Look at the error messages to see which sites are blocked vs. just no results
+- Try using `--url` with a direct manga link instead of search
+- Try on a different network (home WiFi, mobile hotspot)
 
 **Manga: Download failed**
 - Check if the URL is correct and points to a series page (not a chapter)
 - Verify the site is supported: `python3 downloader.py --manga --list`
 - Try a different manga site if the current one is not working
 - Some sites may be temporarily down or blocking automated downloads
+- Your network may be blocking the manga site
 
 **Manga: 404 errors or "No chapters found"** when using `--language`
 - The manga may not have the language you requested available

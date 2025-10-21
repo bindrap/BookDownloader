@@ -9,6 +9,8 @@ import sys
 import os
 import glob
 import re
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, quote
 from rich import print
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
@@ -34,6 +36,7 @@ MANGA_SITES = [
     {"name": "Manganelo.com", "url": "https://manganelo.com"},
     {"name": "Manganelo.tv", "url": "https://manganelo.tv"},
     {"name": "MangaPanda", "url": "https://mangapanda.in"},
+    {"name": "NatoManga", "url": "https://www.natomanga.com"},
     {"name": "ReadMangaBat", "url": "https://readmangabat.com"},
     {"name": "TCB Scans (.com)", "url": "https://tcbscans.com"},
     {"name": "TCB Scans (.net)", "url": "https://www.tcbscans.net"},
@@ -178,6 +181,144 @@ def show_manga_sites():
 
     print(table)
 
+def search_manga_site(site, query):
+    """Search a specific manga site for a query"""
+    results = []
+    error_msg = None
+
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+
+        # Site-specific search implementations
+        if 'mangadex.org' in site['url']:
+            # MangaDex API search
+            api_url = f"https://api.mangadex.org/manga?title={quote(query)}&limit=10"
+            response = requests.get(api_url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                for item in data.get('data', []):
+                    title = item.get('attributes', {}).get('title', {}).get('en', 'Unknown')
+                    manga_id = item.get('id', '')
+                    url = f"https://mangadex.org/title/{manga_id}"
+                    results.append({
+                        'title': title,
+                        'url': url,
+                        'site': site['name']
+                    })
+
+        elif 'manganato.com' in site['url']:
+            # Manganato search
+            search_url = f"https://manganato.com/search/story/{quote(query.replace(' ', '_'))}"
+            response = requests.get(search_url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                items = soup.select('.search-story-item')
+                for item in items[:10]:
+                    link = item.select_one('a.item-img')
+                    title_elem = item.select_one('h3.item-title a')
+                    if link and title_elem:
+                        results.append({
+                            'title': title_elem.text.strip(),
+                            'url': link['href'],
+                            'site': site['name']
+                        })
+
+        elif 'mangakakalot.com' in site['url']:
+            # Mangakakalot search
+            search_url = f"https://mangakakalot.com/search/story/{quote(query.replace(' ', '_'))}"
+            response = requests.get(search_url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                items = soup.select('.story_item')
+                for item in items[:10]:
+                    link = item.select_one('a')
+                    if link:
+                        results.append({
+                            'title': link.text.strip(),
+                            'url': link['href'],
+                            'site': site['name']
+                        })
+
+        elif 'natomanga.com' in site['url']:
+            # NatoManga search
+            search_url = f"https://www.natomanga.com/search?q={quote(query)}"
+            response = requests.get(search_url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                items = soup.select('.manga-item, .search-item, article')
+                for item in items[:10]:
+                    link = item.select_one('a[href*="/manga/"]')
+                    title_elem = item.select_one('.manga-title, .title, h3, h2')
+                    if link and title_elem:
+                        full_url = urljoin(site['url'], link['href'])
+                        results.append({
+                            'title': title_elem.text.strip(),
+                            'url': full_url,
+                            'site': site['name']
+                        })
+
+        elif 'chapmanganato.to' in site['url']:
+            # Chapmanganato search
+            search_url = f"https://chapmanganato.to/search/story/{quote(query.replace(' ', '_'))}"
+            response = requests.get(search_url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                items = soup.select('.search-story-item')
+                for item in items[:10]:
+                    link = item.select_one('a.item-img')
+                    title_elem = item.select_one('h3 a')
+                    if link and title_elem:
+                        results.append({
+                            'title': title_elem.text.strip(),
+                            'url': link['href'],
+                            'site': site['name']
+                        })
+
+    except requests.exceptions.Timeout:
+        error_msg = "timeout"
+    except requests.exceptions.ConnectionError:
+        error_msg = "blocked/unreachable"
+    except Exception as e:
+        error_msg = "error"
+
+    return results, error_msg
+
+def search_all_manga_sites(query):
+    """Search all manga sites for a query"""
+    print(f"\n[bold cyan]Searching for '{query}' across all sites...[/bold cyan]\n")
+    all_results = []
+    success_count = 0
+    failed_count = 0
+    blocked_sites = []
+
+    for site in MANGA_SITES:
+        print(f"[yellow]Searching {site['name']}...[/yellow]", end=" ")
+        results, error = search_manga_site(site, query)
+
+        if error:
+            failed_count += 1
+            blocked_sites.append(f"{site['name']} ({error})")
+            print(f"[red]✗ {error}[/red]")
+        elif results:
+            success_count += 1
+            all_results.extend(results)
+            print(f"[green]✓ Found {len(results)} result(s)[/green]")
+        else:
+            print(f"[dim]- No results[/dim]")
+
+    # Summary
+    print(f"\n[bold]Search Summary:[/bold]")
+    print(f"[green]✓ {success_count} site(s) returned results[/green]")
+    if failed_count > 0:
+        print(f"[red]✗ {failed_count} site(s) failed or blocked[/red]")
+        if blocked_sites:
+            print(f"[dim]  Failed sites: {', '.join(blocked_sites[:5])}{'...' if len(blocked_sites) > 5 else ''}[/dim]")
+    print(f"[cyan]Total results: {len(all_results)}[/cyan]")
+
+    return all_results
+
 def cleanup_non_english_manga():
     """Remove manga files with language suffixes, keeping only English (no suffix) versions"""
     cbz_files = glob.glob("*.cbz")
@@ -256,20 +397,66 @@ def download_manga(url, chapters=None, bundle=False, language=None, english_only
         print("[yellow]Make sure you're running this script from the BookDownloader directory[/yellow]")
         sys.exit(1)
 
-def handle_manga_download(url=None, chapters=None, bundle=False, language=None, english_only=False, interactive=False):
+def handle_manga_download(url=None, chapters=None, bundle=False, language=None, english_only=False, interactive=False, search_mode=False, search_query=None):
     """Handle manga download"""
-    if interactive or not url:
+    if interactive or not url or search_mode:
         print("\n[bold cyan]Manga Download - Interactive Mode[/bold cyan]\n")
-        show_manga_sites()
 
-        print("\n")
-        url = Prompt.ask("[cyan]Enter the manga series URL[/cyan]")
+        # Search mode - let user search for manga by title
+        if search_mode or search_query:
+            if not search_query:
+                search_query = Prompt.ask("[cyan]Enter manga title to search[/cyan]")
 
+            results = search_all_manga_sites(search_query)
+
+            if not results:
+                print("\n[red]No results found.[/red]")
+                print("[yellow]Note: Some sites may be blocked by your network/firewall.[/yellow]")
+                print("[yellow]Try using --url with a direct manga URL instead.[/yellow]")
+                return
+
+            print(f"\n[bold green]Found {len(results)} results:[/bold green]\n")
+
+            # Display results in a table
+            table = Table(show_header=True, header_style="bold magenta")
+            table.add_column("No.", style="cyan", width=4)
+            table.add_column("Title", style="green")
+            table.add_column("Site", style="yellow")
+
+            for idx, result in enumerate(results):
+                table.add_row(str(idx + 1), result['title'], result['site'])
+
+            print(table)
+            print()
+
+            # Let user select a result
+            selection = Prompt.ask(
+                "[cyan]Enter the number of the manga to download (or 'exit' to cancel)[/cyan]",
+                choices=[str(i + 1) for i in range(len(results))] + ["exit"]
+            )
+
+            if selection.lower() == "exit":
+                print("Cancelled.")
+                return
+
+            selected = results[int(selection) - 1]
+            url = selected['url']
+            print(f"\n[bold]Selected:[/bold] [green]{selected['title']}[/green] from [yellow]{selected['site']}[/yellow]")
+            print(f"[blue]URL:[/blue] {url}\n")
+
+        # Direct URL mode - show supported sites
+        else:
+            show_manga_sites()
+            print("\n")
+            url = Prompt.ask("[cyan]Enter the manga series URL[/cyan]")
+
+        # Ask for chapters
         chapters = Prompt.ask(
             "[cyan]Enter chapter range (e.g., '1-10' or '1,3,5-10')[/cyan]",
             default=""
         )
 
+        # Ask for bundle option
         bundle_choice = Prompt.ask(
             "[cyan]Bundle all chapters into one file?[/cyan]",
             choices=["yes", "no"],
@@ -277,8 +464,9 @@ def handle_manga_download(url=None, chapters=None, bundle=False, language=None, 
         )
         bundle = bundle_choice.lower() == "yes"
 
+        # Language selection - default to English only
         print("\n[bold cyan]Language Options:[/bold cyan]")
-        print("[yellow]1. English only (downloads all, keeps only English versions)[/yellow]")
+        print("[yellow]1. English only (downloads all, keeps only English versions) [DEFAULT][/yellow]")
         print("[yellow]2. Specific language (e.g., 'en', 'es', 'ja')[/yellow]")
         print("[yellow]3. All languages (downloads everything)[/yellow]")
 
@@ -319,13 +507,16 @@ Examples:
   # Download a book
   python3 downloader.py --book "Pride and Prejudice"
 
-  # Download manga (English only - RECOMMENDED)
+  # Search for manga across all sites (NEW!)
+  python3 downloader.py --manga --search "one punch man"
+
+  # Download manga by URL (English only - RECOMMENDED)
   python3 downloader.py --manga --url https://mangadex.org/title/XXXXX/one-piece --chapters 1-10 --english-only
 
   # Download manga (specific language)
   python3 downloader.py --manga --url https://mangadex.org/title/XXXXX/one-piece --chapters 1-10 --language es
 
-  # Interactive manga download
+  # Interactive mode (will ask if you want to search or use URL)
   python3 downloader.py --manga
 
   # List manga sites
@@ -345,6 +536,7 @@ Examples:
     parser.add_argument('--language', type=str, help='Language code, e.g., "en" (for manga mode)')
     parser.add_argument('--english-only', action='store_true', help='Download all languages but keep only English versions (for manga mode)')
     parser.add_argument('--list', action='store_true', help='List supported manga sites')
+    parser.add_argument('--search', type=str, metavar='TITLE', help='Search for manga by title across all sites (for manga mode)')
 
     args = parser.parse_args()
 
@@ -363,7 +555,16 @@ Examples:
             book_title = Prompt.ask("\n[cyan]Enter book title to search[/cyan]")
             handle_book_download(book_title)
         elif choice == "manga":
-            handle_manga_download(interactive=True)
+            # Ask if user wants to search or use direct URL
+            manga_mode = Prompt.ask(
+                "\n[cyan]How would you like to find your manga?[/cyan]",
+                choices=["search", "url"],
+                default="search"
+            )
+            if manga_mode == "search":
+                handle_manga_download(interactive=True, search_mode=True)
+            else:
+                handle_manga_download(interactive=True)
         else:
             print("Goodbye!")
             sys.exit(0)
@@ -377,9 +578,25 @@ Examples:
         if args.list:
             show_manga_sites()
             print("\n[yellow]To download manga, use:[/yellow]")
+            print("[cyan]python3 downloader.py --manga --search \"manga title\"[/cyan]")
             print("[cyan]python3 downloader.py --manga --url [URL] --english-only[/cyan]")
+        elif args.search:
+            handle_manga_download(
+                chapters=args.chapters,
+                bundle=args.bundle,
+                language=args.language,
+                english_only=getattr(args, 'english_only', False),
+                search_mode=True,
+                search_query=args.search
+            )
         else:
-            handle_manga_download(args.url, args.chapters, args.bundle, args.language, getattr(args, 'english_only', False))
+            handle_manga_download(
+                args.url,
+                args.chapters,
+                args.bundle,
+                args.language,
+                getattr(args, 'english_only', False)
+            )
 
     else:
         parser.print_help()
