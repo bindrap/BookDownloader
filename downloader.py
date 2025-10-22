@@ -9,16 +9,32 @@ import sys
 import os
 import glob
 import re
+import time
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote
 from rich import print
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
+# Create a persistent session for human-like requests
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+})
+
 # Book API endpoints
 GUTENDEX_API = "https://gutendex.com/books?search="
 OPENLIBRARY_API = "https://openlibrary.org/search.json?q="
 IA_METADATA_API = "https://archive.org/metadata/"
+STANDARD_EBOOKS_API = "https://standardebooks.org/opds/all"
+FEEDBOOKS_SEARCH = "https://www.feedbooks.com/search.json?query="
+FREEBOOK123_SEARCH = "https://123freebook.com/?s="
 
 # Supported manga sites
 MANGA_SITES = [
@@ -83,6 +99,145 @@ def search_openlibrary(query):
         print(f"[yellow]Warning: Open Library search failed: {e}[/yellow]")
         return []
 
+def search_standard_ebooks(query):
+    """Search Standard Ebooks"""
+    print("[bold blue]Searching Standard Ebooks...[/bold blue]")
+    try:
+        # Standard Ebooks provides OPDS feed, we'll scrape their website search instead
+        search_url = f"https://standardebooks.org/ebooks/?query={requests.utils.quote(query)}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(search_url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        results = []
+
+        # Find book entries
+        books = soup.select('li[typeof="schema:Book"]')[:10]
+
+        for book in books:
+            # Get title
+            title_elem = book.select_one('span[property="schema:name"]')
+            if not title_elem:
+                continue
+
+            title = title_elem.text.strip()
+
+            # Get author - it's nested inside the author property
+            author = "Unknown"
+            author_container = book.select_one('[property="schema:author"]')
+            if author_container:
+                author_name = author_container.select_one('span[property="schema:name"]')
+                if author_name:
+                    author = author_name.text.strip()
+
+            # Get link
+            link_elem = book.select_one('a[property="schema:url"]')
+            if link_elem:
+                book_url = "https://standardebooks.org" + link_elem.get('href', '')
+                results.append({
+                    "source": "Standard Ebooks",
+                    "title": title,
+                    "author": author,
+                    "book_url": book_url
+                })
+
+        return results
+    except Exception as e:
+        print(f"[yellow]Warning: Standard Ebooks search failed: {e}[/yellow]")
+        return []
+
+def search_feedbooks(query):
+    """Search Feedbooks public domain"""
+    print("[bold blue]Searching Feedbooks...[/bold blue]")
+    try:
+        # Feedbooks public domain catalog
+        search_url = f"https://catalog.feedbooks.com/search.json?query={requests.utils.quote(query)}&category=FBPUB"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(search_url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+        results = []
+
+        for item in data.get('books', [])[:10]:
+            # Extract author names
+            authors = ", ".join([a.get('name', 'Unknown') for a in item.get('authors', [])])
+
+            results.append({
+                "source": "Feedbooks",
+                "title": item.get('title', 'Unknown Title'),
+                "author": authors if authors else "Unknown",
+                "book_id": item.get('id', ''),
+                "epub_url": item.get('epub_url', '')
+            })
+
+        return results
+    except Exception as e:
+        print(f"[yellow]Warning: Feedbooks search failed: {e}[/yellow]")
+        return []
+
+def search_123freebook(query):
+    """Search 123freebook.com"""
+    print("[bold blue]Searching 123FreeBook...[/bold blue]")
+    try:
+        search_url = f"https://123freebook.com/?s={requests.utils.quote(query)}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(search_url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        results = []
+
+        # Find book entries - they're typically in article or div containers
+        # Common selectors for WordPress book sites
+        books = soup.select('article.post, div.book-item, div.search-item')[:10]
+
+        if not books:
+            # Fallback: try finding links with book patterns
+            books = soup.select('h2 a, h3 a, .entry-title a')[:10]
+
+        for book in books:
+            if book.name == 'a':
+                # Direct link element
+                title_elem = book
+                link_elem = book
+            else:
+                # Container element
+                title_elem = book.select_one('h2 a, h3 a, .entry-title a, a.book-title')
+                link_elem = title_elem
+
+            if title_elem and link_elem:
+                title = title_elem.get_text(strip=True)
+                book_url = link_elem.get('href', '')
+
+                # Try to find author
+                author_elem = book.select_one('.author, .book-author, span[rel="author"]')
+                author = author_elem.get_text(strip=True) if author_elem else "Unknown"
+
+                # Only add if we have a valid URL
+                if book_url and ('123freebook.com' in book_url or book_url.startswith('/')):
+                    if book_url.startswith('/'):
+                        book_url = f"https://123freebook.com{book_url}"
+
+                    results.append({
+                        "source": "123FreeBook",
+                        "title": title,
+                        "author": author,
+                        "book_url": book_url
+                    })
+
+        return results
+    except Exception as e:
+        print(f"[yellow]Warning: 123FreeBook search failed: {e}[/yellow]")
+        return []
+
 def get_download_links(item):
     """Get download link for a book"""
     if item["source"] == "Gutenberg":
@@ -90,80 +245,312 @@ def get_download_links(item):
         for preferred in ["application/epub+zip", "application/pdf", "text/plain"]:
             if preferred in formats:
                 return formats[preferred]
+
     elif item["source"] == "Internet Archive":
         ia_id = item["ia_id"]
         try:
-            response = requests.get(IA_METADATA_API + ia_id, timeout=10)
+            # Use session with referer to appear more legitimate
+            metadata_url = IA_METADATA_API + ia_id
+            response = session.get(metadata_url, timeout=10)
             response.raise_for_status()
             files = response.json().get("files", [])
+
+            # Look for downloadable formats
             for ext in [".epub", ".pdf", ".txt"]:
                 for f in files:
                     if f["name"].endswith(ext):
-                        return f"https://archive.org/download/{ia_id}/{f['name']}"
+                        # Return the item ID and filename for special handling
+                        return {
+                            'url': f"https://archive.org/download/{ia_id}/{f['name']}",
+                            'ia_id': ia_id,
+                            'filename': f['name'],
+                            'needs_ia_handling': True
+                        }
         except Exception as e:
             print(f"[red]Error getting download link: {e}[/red]")
+
+    elif item["source"] == "Standard Ebooks":
+        # Get download page and extract epub link
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(item["book_url"], headers=headers, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Look for epub download link
+            epub_link = soup.select_one('a[href*=".epub"]')
+            if epub_link:
+                return urljoin("https://standardebooks.org", epub_link['href'])
+        except Exception as e:
+            print(f"[red]Error getting Standard Ebooks download link: {e}[/red]")
+
+    elif item["source"] == "Feedbooks":
+        # Feedbooks provides direct epub URL
+        if item.get("epub_url"):
+            return item["epub_url"]
+        # Fallback: construct download URL from book ID
+        elif item.get("book_id"):
+            return f"https://www.feedbooks.com/book/{item['book_id']}.epub"
+
+    elif item["source"] == "123FreeBook":
+        # Get book page and extract download link
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(item["book_url"], headers=headers, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Look for download buttons/links for EPUB (preferred) or PDF
+            # Common patterns: download buttons, direct links
+            download_link = None
+
+            # Try multiple selectors for download links
+            selectors = [
+                'a[href*=".epub"]',
+                'a[href*=".pdf"]',
+                'a.download-button[href*="epub"]',
+                'a.download-button[href*="pdf"]',
+                'a[class*="download"][href*="epub"]',
+                'a[class*="download"][href*="pdf"]',
+                'button[onclick*="download"]',
+            ]
+
+            for selector in selectors:
+                link = soup.select_one(selector)
+                if link:
+                    href = link.get('href', '')
+                    if href:
+                        # Prioritize EPUB over PDF
+                        if '.epub' in href.lower():
+                            return urljoin(item["book_url"], href)
+                        elif not download_link:  # Use PDF as fallback
+                            download_link = urljoin(item["book_url"], href)
+
+            if download_link:
+                return download_link
+
+        except Exception as e:
+            print(f"[red]Error getting 123FreeBook download link: {e}[/red]")
+
     return None
 
-def download_file(url, title):
-    """Download a book file"""
-    filename = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
-    filename = filename.replace(" ", "_")[:100]
+def download_file_ia(ia_id, filename_on_server, title):
+    """Download a file from Internet Archive with proper authentication"""
+    print(f"[cyan]Attempting Internet Archive download with browser simulation...[/cyan]")
 
-    # Extract extension from URL, but filter out invalid extensions
-    ext = os.path.splitext(url.split('?')[0])[1]
-    valid_extensions = ['.epub', '.pdf', '.txt', '.mobi', '.azw3']
+    # Clean up the title for local filename
+    local_filename = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+    local_filename = local_filename.replace(" ", "_")[:100]
 
-    # If no extension or invalid extension, default to .epub
-    if not ext or ext.lower() not in valid_extensions:
+    # Extract extension from server filename
+    ext = os.path.splitext(filename_on_server)[1]
+    if not ext or ext.lower() not in ['.epub', '.pdf', '.txt', '.mobi', '.azw3']:
         ext = ".epub"
+    local_filename += ext
 
-    filename += ext
-
-    print(f"[green]Downloading:[/green] {filename}")
     try:
-        with requests.get(url, stream=True, timeout=30) as r:
+        # Step 1: Visit the item page first (like a human would)
+        item_page_url = f"https://archive.org/details/{ia_id}"
+        print(f"[dim]Step 1: Visiting book page...[/dim]")
+        session.get(item_page_url, timeout=10)
+        time.sleep(0.5)  # Brief delay like human browsing
+
+        # Step 2: Try direct download with referer
+        download_url = f"https://archive.org/download/{ia_id}/{filename_on_server}"
+        print(f"[dim]Step 2: Initiating download...[/dim]")
+
+        headers = {
+            'Referer': item_page_url,
+            'Accept': 'application/epub+zip,application/pdf,*/*',
+        }
+
+        with session.get(download_url, stream=True, timeout=30, headers=headers) as r:
             r.raise_for_status()
             total_size = int(r.headers.get('content-length', 0))
             downloaded = 0
-            with open(filename, 'wb') as f:
+
+            print(f"[green]Downloading:[/green] {local_filename}")
+            with open(local_filename, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total_size > 0:
                         percent = (downloaded / total_size) * 100
                         print(f"Progress: {percent:.1f}%", end='\r')
-        print(f"\n[bold green]Saved to {filename}[/bold green]")
+
+        print(f"\n[bold green]✓ Successfully downloaded to {local_filename}[/bold green]")
         return True
-    except Exception as e:
-        print(f"\n[red]Download failed: {e}[/red]")
-        if os.path.exists(filename):
-            os.remove(filename)
+
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            print(f"\n[red]✗ 401 Unauthorized - Internet Archive requires authentication[/red]")
+            print(f"[yellow]This book may require borrowing/lending on archive.org[/yellow]")
+            print(f"[yellow]Try manually visiting: {item_page_url}[/yellow]")
+        else:
+            print(f"\n[red]✗ Download failed: {e}[/red]")
+        if os.path.exists(local_filename):
+            os.remove(local_filename)
         return False
+    except Exception as e:
+        print(f"\n[red]✗ Download failed: {e}[/red]")
+        if os.path.exists(local_filename):
+            os.remove(local_filename)
+        return False
+
+def download_file(url, title):
+    """Download a book file"""
+    # Handle string URLs (simple downloads)
+    if isinstance(url, str):
+        filename = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        filename = filename.replace(" ", "_")[:100]
+
+        # Extract extension from URL
+        ext = os.path.splitext(url.split('?')[0])[1]
+        valid_extensions = ['.epub', '.pdf', '.txt', '.mobi', '.azw3']
+
+        if not ext or ext.lower() not in valid_extensions:
+            ext = ".epub"
+
+        filename += ext
+
+        print(f"[green]Downloading:[/green] {filename}")
+        try:
+            # Add referer header for better compatibility
+            headers = {'Referer': url.rsplit('/', 1)[0] + '/'}
+            with session.get(url, stream=True, timeout=30, headers=headers) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0))
+                downloaded = 0
+                with open(filename, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            print(f"Progress: {percent:.1f}%", end='\r')
+            print(f"\n[bold green]✓ Saved to {filename}[/bold green]")
+            return True
+        except Exception as e:
+            print(f"\n[red]✗ Download failed: {e}[/red]")
+            if os.path.exists(filename):
+                os.remove(filename)
+            return False
+
+    # Handle dict URLs (Internet Archive special handling)
+    elif isinstance(url, dict) and url.get('needs_ia_handling'):
+        return download_file_ia(url['ia_id'], url['filename'], title)
+
+    else:
+        print(f"[red]Invalid URL format[/red]")
+        return False
+
+def calculate_relevance(query, title):
+    """Calculate relevance score for a book title compared to search query"""
+    query_lower = query.lower().strip()
+    title_lower = title.lower().strip()
+
+    # Exact match = highest score
+    if query_lower == title_lower:
+        return 100
+
+    # Title starts with query = very high score
+    if title_lower.startswith(query_lower):
+        return 90
+
+    # Query is in title as complete phrase = high score
+    if query_lower in title_lower:
+        return 80
+
+    # Check if all query words are in title
+    query_words = set(query_lower.split())
+    title_words = set(title_lower.split())
+
+    if not query_words:
+        return 0
+
+    # Calculate percentage of query words found in title
+    matching_words = query_words.intersection(title_words)
+    match_percentage = len(matching_words) / len(query_words) * 100
+
+    # At least 70% of words must match
+    if match_percentage >= 70:
+        return int(match_percentage)
+
+    return 0
 
 def handle_book_download(book_title):
     """Handle book search and download"""
     print(f"\n[bold cyan]Searching for book: {book_title}[/bold cyan]\n")
 
-    all_results = search_gutendex(book_title) + search_openlibrary(book_title)
+    # Search all sources
+    all_results = (
+        search_gutendex(book_title) +
+        search_openlibrary(book_title) +
+        search_standard_ebooks(book_title) +
+        search_feedbooks(book_title) +
+        search_123freebook(book_title)
+    )
 
     if not all_results:
         print("[red]No results found.[/red]")
         return
 
-    print(f"\n[bold]Found {len(all_results)} results:[/bold]\n")
-    for idx, item in enumerate(all_results):
+    # Calculate relevance scores and filter
+    scored_results = []
+    for result in all_results:
+        score = calculate_relevance(book_title, result['title'])
+        if score > 0:  # Only keep results with some relevance
+            result['relevance'] = score
+            scored_results.append(result)
+
+    # Sort by relevance (highest first)
+    scored_results.sort(key=lambda x: x['relevance'], reverse=True)
+
+    # Limit to top 15 most relevant results
+    top_results = scored_results[:15]
+
+    if not top_results:
+        print("[red]No relevant results found.[/red]")
+        print("[yellow]Try different search terms or check spelling.[/yellow]")
+        return
+
+    print(f"\n[bold]Found {len(top_results)} relevant results:[/bold]\n")
+    for idx, item in enumerate(top_results):
         print(f"[{idx}] [cyan]{item['title']}[/cyan] by [magenta]{item['author']}[/magenta] ([yellow]{item['source']}[/yellow])")
 
     print("\n")
-    selection = Prompt.ask("Enter the number of the book to download", choices=[str(i) for i in range(len(all_results))])
-    selected = all_results[int(selection)]
+    selection = Prompt.ask("Enter the number of the book to download", choices=[str(i) for i in range(len(top_results))])
+    selected = top_results[int(selection)]
 
     print(f"\n[bold]Selected:[/bold] {selected['title']} by {selected['author']}\n")
     url = get_download_links(selected)
 
     if url:
-        print(f"[blue]Download URL:[/blue] {url}\n")
-        download_file(url, selected["title"])
+        # Display URL info
+        if isinstance(url, dict):
+            print(f"[blue]Source:[/blue] Internet Archive")
+            print(f"[blue]Item ID:[/blue] {url['ia_id']}\n")
+        else:
+            print(f"[blue]Download URL:[/blue] {url}\n")
+
+        success = download_file(url, selected["title"])
+
+        # If download failed, suggest alternatives
+        if not success and len(top_results) > 1:
+            print("\n[yellow]Download failed. Here are your options:[/yellow]")
+            if selected['source'] == 'Internet Archive':
+                print("[yellow]1. Internet Archive books may require borrowing/authentication[/yellow]")
+                print("[yellow]2. Many are blocked on work/school networks[/yellow]")
+                print(f"[yellow]3. Try other sources from the {len(top_results)} results above:[/yellow]")
+                for idx, result in enumerate(top_results):
+                    if result['source'] != 'Internet Archive':
+                        print(f"   [{idx}] {result['title']} - [green]{result['source']}[/green]")
+            else:
+                print("[yellow]Try selecting a different result from the search results above.[/yellow]")
     else:
         print("[red]No downloadable format found for this entry.[/red]")
 
@@ -320,25 +707,66 @@ def search_all_manga_sites(query):
     return all_results
 
 def cleanup_non_english_manga():
-    """Remove manga files with language suffixes, keeping only English (no suffix) versions"""
+    """Remove manga files with non-English language indicators, keeping English versions"""
     cbz_files = glob.glob("*.cbz")
 
     if not cbz_files:
         return 0, 0
 
-    # Pattern to detect language suffixes
-    # English files: "Title - Chapter XXXX.cbz"
-    # Non-English: "Title - Chapter XXXX SomeText.cbz" or "Title - Chapter XXXX SomeText v2.cbz"
-    # Match files that have text after chapter number and before .cbz
-    non_english_pattern = re.compile(r'- Chapter \d{4} .+\.cbz$', re.IGNORECASE)
+    # Pattern to detect non-English language codes and indicators
+    # Look for common language codes in parentheses, brackets, or standalone
+    # Common patterns: (es), [ja], - pt -, Spanish, etc.
+    non_english_patterns = [
+        # Language codes in parentheses/brackets
+        r'\(es\)',  # Spanish
+        r'\(ja\)', r'\(jp\)',  # Japanese
+        r'\(pt\)', r'\(pt-br\)',  # Portuguese
+        r'\(fr\)',  # French
+        r'\(de\)',  # German
+        r'\(ru\)',  # Russian
+        r'\(zh\)', r'\(cn\)',  # Chinese
+        r'\(tr\)',  # Turkish
+        r'\(ar\)',  # Arabic
+        r'\(it\)',  # Italian
+        r'\(ko\)', r'\(kr\)',  # Korean
+        r'\(pl\)',  # Polish
+        r'\(nl\)',  # Dutch
+        r'\(sv\)',  # Swedish
+        r'\(vi\)',  # Vietnamese
+        r'\(th\)',  # Thai
+        r'\(id\)',  # Indonesian
+
+        r'\[es\]', r'\[ja\]', r'\[jp\]', r'\[pt\]', r'\[fr\]', r'\[de\]',
+        r'\[ru\]', r'\[zh\]', r'\[cn\]', r'\[tr\]', r'\[ar\]', r'\[it\]',
+        r'\[ko\]', r'\[kr\]', r'\[pl\]', r'\[nl\]', r'\[sv\]', r'\[vi\]',
+        r'\[th\]', r'\[id\]',
+
+        # Language names (standalone or with separators)
+        r'\bspanish\b', r'\bespañol\b',
+        r'\bjapanese\b', r'\b日本語\b',
+        r'\bportuguese\b', r'\bportuguês\b',
+        r'\bfrench\b', r'\bfrançais\b',
+        r'\bgerman\b', r'\bdeutsch\b',
+        r'\brussian\b', r'\bрусский\b',
+        r'\bchinese\b', r'\b中文\b',
+        r'\bturkish\b', r'\btürkçe\b',
+        r'\barabic\b', r'\bعربي\b',
+        r'\bitalian\b', r'\bitaliano\b',
+        r'\bkorean\b', r'\b한국어\b',
+    ]
+
+    # Compile all patterns into one regex (case-insensitive)
+    combined_pattern = re.compile('|'.join(non_english_patterns), re.IGNORECASE)
 
     english_files = []
     non_english_files = []
 
     for file in cbz_files:
-        if non_english_pattern.search(file):
+        # If file contains any non-English language indicator, mark for removal
+        if combined_pattern.search(file):
             non_english_files.append(file)
         else:
+            # No language indicator found = assume English (or English by default)
             english_files.append(file)
 
     # Remove non-English files
@@ -357,37 +785,41 @@ def download_manga(url, chapters=None, bundle=False, language=None, english_only
     """Download manga using the manga-downloader binary"""
     cmd = ["./manga-downloader"]
 
+    # Add flags first (before URL and chapters)
+    # Add language filter
+    # If english_only is True, download only English
+    # Otherwise, use specified language or download all languages
+    if english_only:
+        cmd.extend(["--language", "en"])
+    elif language:
+        cmd.extend(["--language", language])
+
+    if bundle:
+        cmd.append("--bundle")
+
+    # Then add URL and chapters
     if url:
         cmd.append(url)
 
     if chapters:
         cmd.append(chapters)
 
-    if bundle:
-        cmd.append("--bundle")
-
-    # Only add language filter if explicitly specified
-    # Note: Without language filter, ALL available languages will be downloaded
-    # If english_only is True, we download all and clean up after
-    if language and not english_only:
-        cmd.extend(["--language", language])
-
     print(f"\n[bold cyan]Running:[/bold cyan] {' '.join(cmd)}\n")
 
     try:
         subprocess.run(cmd, check=True)
 
-        # Clean up non-English files if requested
+        # Clean up non-English files if requested (safety net - shouldn't be needed with --language en)
         if english_only:
-            print("\n[bold cyan]Cleaning up non-English files...[/bold cyan]")
+            print("\n[bold cyan]Verifying English-only download...[/bold cyan]")
             english_count, removed_count = cleanup_non_english_manga()
             if removed_count > 0:
-                print(f"\n[bold green]✓ Kept {english_count} English file(s)[/bold green]")
-                print(f"[bold yellow]✓ Removed {removed_count} non-English file(s)[/bold yellow]")
+                print(f"\n[bold yellow]⚠ Found and removed {removed_count} non-English file(s) (this shouldn't happen)[/bold yellow]")
+                print(f"[bold green]✓ Kept {english_count} English file(s)[/bold green]")
             elif english_count > 0:
-                print(f"\n[bold green]✓ All {english_count} file(s) are English - no cleanup needed[/bold green]")
+                print(f"\n[bold green]✓ All {english_count} file(s) are English - download successful[/bold green]")
             else:
-                print("\n[bold yellow]⚠ No files found to clean up[/bold yellow]")
+                print("\n[bold yellow]⚠ No files found[/bold yellow]")
 
     except subprocess.CalledProcessError as e:
         print(f"\n[red]Error: Download failed with exit code {e.returncode}[/red]")
@@ -466,7 +898,7 @@ def handle_manga_download(url=None, chapters=None, bundle=False, language=None, 
 
         # Language selection - default to English only
         print("\n[bold cyan]Language Options:[/bold cyan]")
-        print("[yellow]1. English only (downloads all, keeps only English versions) [DEFAULT][/yellow]")
+        print("[yellow]1. English only (downloads only English versions) [DEFAULT][/yellow]")
         print("[yellow]2. Specific language (e.g., 'en', 'es', 'ja')[/yellow]")
         print("[yellow]3. All languages (downloads everything)[/yellow]")
 

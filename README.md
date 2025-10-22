@@ -51,13 +51,15 @@ python3 downloader.py --manga --list
 
 - **Single unified interface** for both books and manga
 - **Interactive mode** - no need to remember commands
-- **Book search** from Project Gutenberg and Internet Archive
+- **Book search** from 5 sources: Project Gutenberg, Internet Archive, Standard Ebooks, Feedbooks, and 123FreeBook
 - **Manga search** - NEW! Search across 19+ sites by title
 - **Manga download** from 19+ supported sites including NatoManga
 - **Smart formatting** with rich colors and progress bars
 - **Multiple formats** - EPUB, PDF, TXT for books; CBZ for manga
-- **English-only mode** - Downloads all languages but keeps only English versions
+- **English-only mode** - Improved language detection keeps English manga, removes non-English versions
 - **Validated file extensions** - Ensures books download with correct formats (.epub, .pdf, etc.)
+- **Network-resilient** - Multiple book sources provide alternatives when one is blocked
+- **68,000+ books** available through 123FreeBook alone
 
 ## Contents
 
@@ -171,7 +173,28 @@ python3 downloader.py --manga --search "one punch man"
 
 ## Recent Improvements
 
-### v2.0 - Manga Search Feature (Latest!)
+### v2.2 - Added 123FreeBook Source (Latest!)
+**Added**: New book source with massive collection
+- **123FreeBook** - 68,000+ public domain books in EPUB and PDF formats
+- Now searches **5 sources** total (was 4)
+- Even more alternatives when some sources are blocked
+- Improved book availability across all genres
+
+### v2.1 - Enhanced Language Detection & More Book Sources
+**Fixed**: Critical bug in English-only manga filter
+- **Old behavior**: Deleted ALL files including English ones (kept 0 files)
+- **New behavior**: Detects actual language codes (es, ja, pt, etc.) in filenames
+- Only removes files with non-English language indicators
+- Keeps English files even if they have chapter titles
+- Supports 18+ language codes and names
+
+**Added**: Alternative book sources for network resilience
+- **Standard Ebooks** - High-quality, beautifully formatted public domain books
+- **Feedbooks** - Public domain catalog with direct epub downloads
+- Provides alternatives when Internet Archive is blocked (401 errors)
+- Better success rate on restricted networks
+
+### v2.0 - Manga Search Feature
 **Added**: Cross-site manga search functionality
 - Search for manga by title across multiple sites simultaneously
 - Interactive selection from search results
@@ -242,9 +265,11 @@ python3 downloader.py --manga --url [URL] --chapters 1-10 --language ja
 ### For Books
 - Be specific with book titles for better search results
 - Classic literature works best (public domain)
-- Check both sources as they may have different formats available
+- Now searches 4 sources: Project Gutenberg, Internet Archive, Standard Ebooks, and Feedbooks
+- If one source is blocked, others may still work
 - Downloaded files will have validated extensions (.epub, .pdf, .txt)
-- **If at work**: Stick to Project Gutenberg - Internet Archive often blocked
+- **Standard Ebooks** provides beautifully formatted, high-quality editions
+- **Feedbooks** often works well on restricted networks
 
 ### For Manga
 - **⚠️ USE AT HOME**: Corporate networks block most manga sites
@@ -293,10 +318,11 @@ pip install requests rich
 - This is caused by network restrictions (common at work/school)
 - Corporate firewalls often block direct downloads from archive.org
 - **Solutions**:
-  - Try at home or on a different network
-  - Try Project Gutenberg books instead (they often work better through firewalls)
+  - The downloader now searches 4 sources automatically
+  - Try selecting a book from Project Gutenberg, Standard Ebooks, or Feedbooks instead
+  - These alternative sources often work better through firewalls
   - Example: `python3 downloader.py --book "Pride and Prejudice"`
-  - Project Gutenberg specializes in classic public domain literature
+  - Look for results marked with [yellow]Project Gutenberg[/yellow], [yellow]Standard Ebooks[/yellow], or [yellow]Feedbooks[/yellow]
 
 **Manga: Binary not found**
 - Make sure you're in the BookDownloader directory when running scripts
