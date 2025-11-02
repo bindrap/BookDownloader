@@ -16,6 +16,13 @@ from rich import print
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
+# Try to import Playwright for browser automation
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
 # Create a persistent session for human-like requests
 session = requests.Session()
 session.headers.update({
@@ -35,6 +42,8 @@ IA_METADATA_API = "https://archive.org/metadata/"
 STANDARD_EBOOKS_API = "https://standardebooks.org/opds/all"
 FEEDBOOKS_SEARCH = "https://www.feedbooks.com/search.json?query="
 FREEBOOK123_SEARCH = "https://123freebook.com/?s="
+ANNAS_ARCHIVE_SEARCH = "https://annas-archive.org/search"
+ANNAS_ARCHIVE_KEY = "DVMRwJdUHGMmyaTr2ntCSSX2ULJY8"  # API key for Anna's Archive
 
 # Supported manga sites
 MANGA_SITES = [
@@ -238,6 +247,68 @@ def search_123freebook(query):
         print(f"[yellow]Warning: 123FreeBook search failed: {e}[/yellow]")
         return []
 
+def search_annas_archive(query):
+    """Search Anna's Archive"""
+    print("[bold blue]Searching Anna's Archive...[/bold blue]")
+    try:
+        search_url = f"{ANNAS_ARCHIVE_SEARCH}?q={requests.utils.quote(query)}&acc=1"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = session.get(search_url, headers=headers, timeout=15)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        results = []
+
+        # Find title links (they have specific classes and link to /md5/)
+        # Look for the main title links with font-semibold text-lg
+        title_links = soup.select('a.font-semibold.text-lg[href^="/md5/"]')[:15]
+
+        for title_link in title_links:
+            # Get the MD5 hash from the URL
+            href = title_link.get('href', '')
+            md5_hash = href.replace('/md5/', '').split('?')[0] if '/md5/' in href else None
+
+            if not md5_hash:
+                continue
+
+            # Extract title
+            title = title_link.get_text(strip=True)
+
+            # Find the parent div that contains all the book info
+            parent = title_link.find_parent('div')
+
+            # Extract author - look for link with user-edit icon
+            author = "Unknown"
+            author_link = None
+            if parent:
+                # Find all links in parent
+                for link in parent.find_all('a', class_='text-sm'):
+                    # Check if this link has the user icon
+                    icon = link.find('span', class_=lambda c: c and 'icon-[mdi--user-edit]' in c)
+                    if icon:
+                        author_link = link
+                        break
+
+            if author_link:
+                # Extract author text, removing the icon
+                author_text = author_link.get_text(strip=True)
+                author = author_text.strip()
+
+            results.append({
+                "source": "Anna's Archive",
+                "title": title,
+                "author": author,
+                "md5": md5_hash,
+                "book_url": f"https://annas-archive.org/md5/{md5_hash}"
+            })
+
+        return results
+    except Exception as e:
+        print(f"[yellow]Warning: Anna's Archive search failed: {e}[/yellow]")
+        return []
+
 def get_download_links(item):
     """Get download link for a book"""
     if item["source"] == "Gutenberg":
@@ -336,7 +407,230 @@ def get_download_links(item):
         except Exception as e:
             print(f"[red]Error getting 123FreeBook download link: {e}[/red]")
 
+    elif item["source"] == "Anna's Archive":
+        # Anna's Archive uses /slow_download/{md5}/0/0 for free downloads
+        # (fast_download requires membership/donation)
+        md5 = item.get('md5')
+        if md5:
+            # Use the first slow partner server (free, no membership required)
+            download_url = f"https://annas-archive.org/slow_download/{md5}/0/0"
+            return {
+                'url': download_url,
+                'md5': md5,
+                'needs_annas_handling': True
+            }
+
     return None
+
+def download_annas_archive_browser(md5, title, download_dir=None):
+    """Download from Anna's Archive using browser automation to bypass DDoS-Guard"""
+    if not PLAYWRIGHT_AVAILABLE:
+        print(f"[red]Playwright not available. Install with: pip install playwright && playwright install chromium[/red]")
+        return False
+
+    if download_dir is None:
+        download_dir = os.getcwd()
+
+    book_url = f"https://annas-archive.org/md5/{md5}"
+
+    print(f"[cyan]Attempting automated download with browser...[/cyan]")
+    print(f"[dim]Note: Anna's Archive has strong anti-bot protection.[/dim]")
+    print(f"[dim]If automation fails, manual download instructions will be provided.[/dim]\n")
+
+    try:
+        with sync_playwright() as p:
+            # Launch browser - use headless mode
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080},
+                accept_downloads=True
+            )
+            page = context.new_page()
+
+            # Step 1: Visit the book page
+            print(f"[dim]Step 1: Loading book page...[/dim]")
+            page.goto(book_url, wait_until='networkidle', timeout=30000)
+
+            # Wait for the page to fully load (DDoS-Guard check may appear)
+            time.sleep(2)
+
+            # Step 2: Look for slow download links
+            print(f"[dim]Step 2: Finding slow download link...[/dim]")
+            try:
+                # Wait for slow download section to be visible
+                page.wait_for_selector('a[href^="/slow_download/"]', timeout=10000)
+                slow_links = page.query_selector_all('a[href^="/slow_download/"]')
+
+                if not slow_links:
+                    print(f"[yellow]No slow download links found[/yellow]")
+                    browser.close()
+                    return False
+
+                # Click the first slow download link
+                print(f"[dim]Step 3: Clicking slow download link...[/dim]")
+                slow_download_url = slow_links[0].get_attribute('href')
+                page.goto(f"https://annas-archive.org{slow_download_url}", wait_until='networkidle', timeout=30000)
+
+                # Wait for DDoS-Guard JavaScript challenge to complete
+                print(f"[dim]Step 4: Waiting for DDoS-Guard verification and page refresh...[/dim]")
+
+                # The slow download page typically refreshes after 5 seconds
+                # Wait for that refresh to happen
+                initial_url = page.url
+
+                # Wait up to 20 seconds for either:
+                # 1. URL to change (redirect to partner)
+                # 2. Page to reload/refresh (same URL but new content)
+                # 3. Download link to appear
+                try:
+                    print(f"[dim]Waiting for page to refresh (typically 5-10 seconds)...[/dim]")
+
+                    # Strategy: Wait for either URL change OR for download link to appear
+                    for i in range(20):
+                        time.sleep(1)
+                        current_url = page.url
+
+                        # Check if we've been redirected
+                        if 'annas-archive.org/slow_download' not in current_url:
+                            print(f"[dim]✓ Redirected to partner site after {i+1} seconds[/dim]")
+                            break
+
+                        # Check if download link appeared on current page
+                        test_links = page.query_selector_all('a[href^="http"]')
+                        for link in test_links:
+                            href = link.get_attribute('href') or ""
+                            text = link.inner_text().lower() if link.inner_text() else ""
+                            if href and 'annas-archive.org' not in href and 'ddos-guard' not in href:
+                                if any(word in text for word in ['download', 'get', 'click']):
+                                    print(f"[dim]✓ Download link appeared after {i+1} seconds[/dim]")
+                                    break
+                        else:
+                            continue
+                        break
+
+                except Exception as e:
+                    print(f"[dim]Wait completed with: {e}[/dim]")
+
+                # Step 3: Look for download button or automatic redirect
+                print(f"[dim]Step 5: Looking for download link...[/dim]")
+                current_url = page.url
+                print(f"[dim]Current URL: {current_url}[/dim]")
+
+                # Wait a bit more for any final JS to execute
+                time.sleep(1)
+
+                # Look for download links
+                download_link = None
+
+                # Check if we're on a partner site or still on Anna's Archive
+                if 'annas-archive.org' not in current_url:
+                    # We're on a partner site - look for download button
+                    print(f"[dim]On partner site, looking for download...[/dim]")
+
+                    # Try to find a download button or link
+                    selectors = [
+                        'a[href*=".epub"]',
+                        'a[href*=".pdf"]',
+                        'a[href*="download"]',
+                        'button:has-text("download")',
+                        'a:has-text("download")',
+                        'a[class*="download"]',
+                        'a[class*="btn"]'
+                    ]
+
+                    for selector in selectors:
+                        try:
+                            element = page.query_selector(selector)
+                            if element:
+                                href = element.get_attribute('href')
+                                if href:
+                                    download_link = href
+                                    print(f"[dim]Found download link: {href[:100]}...[/dim]")
+                                    break
+                        except:
+                            continue
+                else:
+                    # Still on Anna's Archive - the slow download might have failed or need more time
+                    print(f"[yellow]Still on Anna's Archive - trying alternate approach...[/yellow]")
+
+                    # Save page content for debugging
+                    content = page.content()
+
+                    # Check for specific messages
+                    if 'wait' in content.lower() or 'queue' in content.lower() or 'busy' in content.lower():
+                        print(f"[yellow]Partner server appears busy - servers may be at capacity[/yellow]")
+                        browser.close()
+                        return False
+
+                    # Look for "Download now" button or similar on the slow download page itself
+                    download_buttons = page.query_selector_all('a, button')
+                    for button in download_buttons:
+                        text = button.inner_text().lower() if button.inner_text() else ""
+                        href = button.get_attribute('href') or ""
+
+                        if any(keyword in text for keyword in ['download now', 'get', 'download', 'click here']):
+                            if href and href.startswith('http') and 'annas-archive.org' not in href:
+                                download_link = href
+                                print(f"[dim]Found download button with external link[/dim]")
+                                break
+
+                    # If still no link, try finding any external link as last resort
+                    if not download_link:
+                        all_links = page.query_selector_all('a[href^="http"]')
+                        for link in all_links:
+                            href = link.get_attribute('href')
+                            if href and 'annas-archive.org' not in href and 'ddos-guard' not in href:
+                                download_link = href
+                                print(f"[dim]Found external link: {href[:80]}...[/dim]")
+                                break
+
+                if download_link:
+                    print(f"[dim]Step 6: Downloading file...[/dim]")
+
+                    # Handle the download
+                    with page.expect_download(timeout=60000) as download_info:
+                        if download_link.startswith('http'):
+                            page.goto(download_link, timeout=60000)
+                        else:
+                            page.click(f'a[href="{download_link}"]', timeout=10000)
+
+                    download = download_info.value
+
+                    # Generate filename
+                    filename = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+                    filename = filename.replace(" ", "_")[:100]
+
+                    # Get extension from suggested filename
+                    suggested = download.suggested_filename
+                    ext = os.path.splitext(suggested)[1] if suggested else ".epub"
+                    filename += ext
+
+                    filepath = os.path.join(download_dir, filename)
+
+                    # Save the download
+                    download.save_as(filepath)
+
+                    print(f"\n[bold green]✓ Successfully downloaded to {filename}[/bold green]")
+                    browser.close()
+                    return True
+                else:
+                    # No download link found - print page URL for manual download
+                    current_url = page.url
+                    print(f"[yellow]⚠ Could not find automatic download link[/yellow]")
+                    print(f"[cyan]The partner page is:[/cyan] {current_url}")
+                    print(f"[dim]You may need to click the download button manually on that page.[/dim]")
+                    browser.close()
+                    return False
+
+            except Exception as e:
+                print(f"[yellow]⚠ Error during browser automation: {e}[/yellow]")
+                browser.close()
+                return False
+
+    except Exception as e:
+        print(f"[red]✗ Browser automation failed: {e}[/red]")
+        return False
 
 def download_file_ia(ia_id, filename_on_server, title):
     """Download a file from Internet Archive with proper authentication"""
@@ -444,6 +738,174 @@ def download_file(url, title):
     elif isinstance(url, dict) and url.get('needs_ia_handling'):
         return download_file_ia(url['ia_id'], url['filename'], title)
 
+    # Handle dict URLs (Anna's Archive special handling)
+    elif isinstance(url, dict) and url.get('needs_annas_handling'):
+        md5 = url.get('md5')
+        book_url = f"https://annas-archive.org/md5/{md5}"
+
+        # Try browser automation first if Playwright is available
+        if PLAYWRIGHT_AVAILABLE:
+            return download_annas_archive_browser(md5, title)
+
+        # Fallback to manual instructions if Playwright not available
+        print(f"[cyan]Attempting Anna's Archive multi-step download...[/cyan]")
+        print(f"[dim]Note: Install Playwright for automatic downloads: pip install playwright && playwright install chromium[/dim]\n")
+
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+
+            # Step 1: Visit book page and get slow download link
+            print(f"[dim]Step 1: Fetching book page...[/dim]")
+            response = session.get(book_url, headers=headers, timeout=15)
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Find the first slow download link
+            slow_download_link = soup.select_one('a[href^="/slow_download/"]')
+            if not slow_download_link:
+                print(f"[yellow]⚠ Could not find slow download link[/yellow]")
+                print(f"[cyan]Please visit manually:[/cyan] {book_url}")
+                return False
+
+            slow_download_url = "https://annas-archive.org" + slow_download_link.get('href')
+            print(f"[dim]Step 2: Following slow download link...[/dim]")
+
+            time.sleep(0.5)  # Brief delay
+            headers['Referer'] = book_url
+
+            # Step 2: Visit slow download page
+            response = session.get(slow_download_url, headers=headers, timeout=20)
+
+            # Check if we got redirected or blocked by DDoS-Guard
+            if response.status_code == 403 or 'ddos-guard' in response.text.lower():
+                print(f"[yellow]⚠ DDoS-Guard protection detected[/yellow]")
+                print(f"[dim]Anna's Archive requires JavaScript verification to prevent bots.[/dim]\n")
+                print(f"[bold cyan]📖 Book Page:[/bold cyan] {book_url}")
+                print(f"\n[bold yellow]Quick Download Steps:[/bold yellow]")
+                print(f"  1. Open the URL above in your browser")
+                print(f"  2. Scroll to '🐢 Slow downloads' section")
+                print(f"  3. Click 'Slow Partner Server #1'")
+                print(f"  4. Wait ~3 seconds for verification")
+                print(f"  5. Click the download button on the partner page")
+                print(f"\n[dim]💡 Tip: The download usually starts automatically after step 4![/dim]")
+                return False
+
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Step 3: Look for the actual download link on the partner page
+            # Anna's Archive partner pages typically have a download button or auto-redirect
+            print(f"[dim]Step 3: Searching for download button...[/dim]")
+
+            # Try to find download links - they might be in different formats
+            download_candidates = []
+
+            # Look for direct file links
+            for link in soup.find_all('a', href=True):
+                href = link.get('href', '')
+                # Check if it's a file download link
+                if any(ext in href.lower() for ext in ['.epub', '.pdf', '.mobi', '.azw', '.azw3']):
+                    download_candidates.append(href)
+                # Check for download buttons
+                elif 'download' in href.lower() or 'get' in link.get_text().lower():
+                    download_candidates.append(href)
+
+            # Also check for meta refresh or JavaScript redirects
+            meta_refresh = soup.find('meta', attrs={'http-equiv': 'refresh'})
+            if meta_refresh:
+                content = meta_refresh.get('content', '')
+                if 'url=' in content.lower():
+                    redirect_url = content.split('url=', 1)[1].strip()
+                    download_candidates.insert(0, redirect_url)
+
+            if not download_candidates:
+                # Try to extract any external links that might be the download
+                external_links = [a.get('href') for a in soup.find_all('a', href=True)
+                                if a.get('href', '').startswith('http') and 'annas-archive.org' not in a.get('href', '')]
+                if external_links:
+                    download_candidates.extend(external_links[:3])
+
+            if download_candidates:
+                print(f"[dim]Step 4: Attempting to download file...[/dim]")
+
+                for candidate_url in download_candidates[:5]:  # Try up to 5 candidates
+                    try:
+                        # Make URL absolute if needed
+                        if not candidate_url.startswith('http'):
+                            if candidate_url.startswith('/'):
+                                candidate_url = urljoin(slow_download_url, candidate_url)
+                            else:
+                                candidate_url = urljoin(response.url, candidate_url)
+
+                        headers['Referer'] = slow_download_url
+                        file_response = session.get(candidate_url, headers=headers, timeout=30, stream=True, allow_redirects=True)
+
+                        content_type = file_response.headers.get('content-type', '').lower()
+
+                        # Check if we got an actual file
+                        if file_response.status_code == 200 and (
+                            'application' in content_type or
+                            'octet-stream' in content_type or
+                            any(ext in content_type for ext in ['epub', 'pdf', 'mobi'])
+                        ):
+                            filename = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+                            filename = filename.replace(" ", "_")[:100]
+
+                            # Get extension
+                            ext = ".epub"
+                            if 'content-disposition' in file_response.headers:
+                                cd = file_response.headers['content-disposition']
+                                fname_match = re.search(r'filename="?([^"]+)"?', cd)
+                                if fname_match:
+                                    file_ext = os.path.splitext(fname_match.group(1))[1]
+                                    if file_ext:
+                                        ext = file_ext
+                            elif 'pdf' in content_type:
+                                ext = ".pdf"
+                            elif 'mobi' in content_type:
+                                ext = ".mobi"
+
+                            filename += ext
+
+                            print(f"[green]Downloading:[/green] {filename}")
+
+                            total_size = int(file_response.headers.get('content-length', 0))
+                            downloaded = 0
+
+                            with open(filename, 'wb') as f:
+                                for chunk in file_response.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if total_size > 0:
+                                        percent = (downloaded / total_size) * 100
+                                        print(f"Progress: {percent:.1f}%", end='\r')
+
+                            print(f"\n[bold green]✓ Successfully downloaded to {filename}[/bold green]")
+                            return True
+
+                    except Exception as e:
+                        continue  # Try next candidate
+
+            # If we get here, automated download failed
+            print(f"[yellow]⚠ Automated download unsuccessful[/yellow]\n")
+            print(f"[bold]Book page:[/bold] {book_url}")
+            print(f"\n[yellow]Please download manually:[/yellow]")
+            print(f"  1. Visit the URL above in your browser")
+            print(f"  2. Click a 'Slow Partner Server' link")
+            print(f"  3. Click the download button on the partner page")
+            return False
+
+        except Exception as e:
+            print(f"[yellow]⚠ Download failed: {e}[/yellow]")
+            print(f"[cyan]Please visit manually:[/cyan] {book_url}")
+            return False
+
     else:
         print(f"[red]Invalid URL format[/red]")
         return False
@@ -486,8 +948,9 @@ def handle_book_download(book_title):
     """Handle book search and download"""
     print(f"\n[bold cyan]Searching for book: {book_title}[/bold cyan]\n")
 
-    # Search all sources
+    # Search all sources - Anna's Archive first as it has the most comprehensive collection
     all_results = (
+        search_annas_archive(book_title) +
         search_gutendex(book_title) +
         search_openlibrary(book_title) +
         search_standard_ebooks(book_title) +
@@ -530,10 +993,14 @@ def handle_book_download(book_title):
     url = get_download_links(selected)
 
     if url:
-        # Display URL info
+        # Display URL info based on source
         if isinstance(url, dict):
-            print(f"[blue]Source:[/blue] Internet Archive")
-            print(f"[blue]Item ID:[/blue] {url['ia_id']}\n")
+            if url.get('needs_ia_handling'):
+                print(f"[blue]Source:[/blue] Internet Archive")
+                print(f"[blue]Item ID:[/blue] {url['ia_id']}\n")
+            elif url.get('needs_annas_handling'):
+                print(f"[blue]Source:[/blue] Anna's Archive")
+                print(f"[blue]Book ID:[/blue] {url['md5']}\n")
         else:
             print(f"[blue]Download URL:[/blue] {url}\n")
 
@@ -706,6 +1173,64 @@ def search_all_manga_sites(query):
 
     return all_results
 
+def deduplicate_chapters():
+    """Remove duplicate chapter versions, keeping only one version per chapter number within the same manga series"""
+    cbz_files = glob.glob("*.cbz")
+
+    if not cbz_files:
+        return 0, 0
+
+    # Pattern to extract manga series name and chapter number
+    # Most manga files follow: "Series Name Volume - Chapter XXXX Title.cbz"
+    # We'll use everything before the volume/chapter indicator as the series identifier
+    series_chapter_pattern = re.compile(r'^(.+?)\s+(?:\d+\s+-\s+)?Chapter\s+(\d+)', re.IGNORECASE)
+
+    # Group files by (series, chapter_number)
+    chapters_map = {}
+    for file in cbz_files:
+        match = series_chapter_pattern.search(file)
+        if match:
+            series_name = match.group(1).strip()
+            chapter_num = match.group(2)
+            key = (series_name, chapter_num)
+
+            if key not in chapters_map:
+                chapters_map[key] = []
+            chapters_map[key].append(file)
+
+    # For each chapter with duplicates, keep the shortest filename (usually the cleanest)
+    # and remove the rest
+    removed_count = 0
+    kept_count = 0
+
+    for (series, chapter_num), files in chapters_map.items():
+        if len(files) > 1:
+            # Sort by length (shorter = cleaner filename usually)
+            # Then alphabetically as tiebreaker
+            files.sort(key=lambda x: (len(x), x))
+
+            # Keep the first one (shortest/cleanest)
+            keep_file = files[0]
+            duplicate_files = files[1:]
+
+            print(f"\n[yellow]Found {len(files)} versions of {series} Chapter {chapter_num}:[/yellow]")
+            print(f"  [green]✓ Keeping:[/green] {keep_file}")
+
+            # Remove duplicates
+            for file in duplicate_files:
+                try:
+                    os.remove(file)
+                    removed_count += 1
+                    print(f"  [red]✗ Removed:[/red] {file}")
+                except Exception as e:
+                    print(f"  [red]Error removing {file}: {e}[/red]")
+
+            kept_count += 1
+        else:
+            kept_count += 1
+
+    return kept_count, removed_count
+
 def cleanup_non_english_manga():
     """Remove manga files with non-English language indicators, keeping English versions"""
     cbz_files = glob.glob("*.cbz")
@@ -781,6 +1306,50 @@ def cleanup_non_english_manga():
 
     return len(english_files), removed_count
 
+def get_mangadex_chapter_info(manga_url, language='en'):
+    """Get available chapter information from MangaDex"""
+    try:
+        # Extract manga ID from URL
+        manga_id = manga_url.split('/title/')[-1].split('/')[0].split('?')[0]
+
+        # Get chapters from MangaDex API
+        api_url = f"https://api.mangadex.org/manga/{manga_id}/feed"
+        params = {
+            'translatedLanguage[]': language,
+            'limit': 500,  # Get many chapters
+            'order[chapter]': 'asc'
+        }
+
+        response = requests.get(api_url, params=params, timeout=10)
+        if response.status_code != 200:
+            return None
+
+        data = response.json()
+
+        # Extract chapter numbers
+        chapters = []
+        for item in data.get('data', []):
+            attrs = item.get('attributes', {})
+            chapter_num = attrs.get('chapter')
+            if chapter_num:
+                try:
+                    chapters.append(float(chapter_num))
+                except:
+                    pass
+
+        if not chapters:
+            return None
+
+        chapters.sort()
+        return {
+            'total': len(chapters),
+            'first': chapters[0],
+            'last': chapters[-1],
+            'all_chapters': chapters
+        }
+    except Exception as e:
+        return None
+
 def download_manga(url, chapters=None, bundle=False, language=None, english_only=False):
     """Download manga using the manga-downloader binary"""
     cmd = ["./manga-downloader"]
@@ -821,8 +1390,28 @@ def download_manga(url, chapters=None, bundle=False, language=None, english_only
             else:
                 print("\n[bold yellow]⚠ No files found[/bold yellow]")
 
+        # Always deduplicate chapters (remove duplicate versions of the same chapter)
+        print("\n[bold cyan]Checking for duplicate chapter versions...[/bold cyan]")
+        kept_count, dedup_removed_count = deduplicate_chapters()
+        if dedup_removed_count > 0:
+            print(f"\n[bold green]✓ Removed {dedup_removed_count} duplicate chapter version(s)[/bold green]")
+            print(f"[bold green]✓ Final chapter count: {kept_count}[/bold green]")
+        else:
+            print(f"[bold green]✓ No duplicates found - {kept_count} unique chapter(s) downloaded[/bold green]")
+
     except subprocess.CalledProcessError as e:
         print(f"\n[red]Error: Download failed with exit code {e.returncode}[/red]")
+
+        # Check if it's a "No chapters found" error
+        if chapters:
+            print(f"\n[yellow]Possible issues:[/yellow]")
+            print(f"  1. The specified chapter range '{chapters}' might not exist")
+            print(f"  2. Some manga use decimal numbers (1.1, 1.2) or special chapters")
+            print(f"  3. 'Official Colored' versions may have different numbering")
+            print(f"\n[cyan]Suggestions:[/cyan]")
+            print(f"  • Try without specifying chapters to download all available")
+            print(f"  • Try a different result from the search (e.g., non-colored version)")
+            print(f"  • Use the manga URL directly with './manga-downloader {url}'")
         sys.exit(1)
     except FileNotFoundError:
         print("[red]Error: manga-downloader binary not found in current directory[/red]")
@@ -882,11 +1471,29 @@ def handle_manga_download(url=None, chapters=None, bundle=False, language=None, 
             print("\n")
             url = Prompt.ask("[cyan]Enter the manga series URL[/cyan]")
 
+        # Check available chapters for MangaDex
+        if 'mangadex.org' in url:
+            print(f"[dim]Checking available chapters...[/dim]")
+            chapter_info = get_mangadex_chapter_info(url, language='en')
+            if chapter_info:
+                print(f"\n[bold cyan]Available Chapters:[/bold cyan]")
+                print(f"  Total: {chapter_info['total']} chapters")
+                print(f"  Range: Chapter {chapter_info['first']:.0f} - {chapter_info['last']:.0f}")
+
+                # Show warning if chapters don't start at 1
+                if chapter_info['first'] > 1:
+                    print(f"  [yellow]⚠ Note: This version starts at Chapter {chapter_info['first']:.0f}, not Chapter 1[/yellow]")
+                    print(f"  [yellow]  (Colored/special versions often only have certain chapters)[/yellow]")
+                print()
+
         # Ask for chapters
         chapters = Prompt.ask(
-            "[cyan]Enter chapter range (e.g., '1-10' or '1,3,5-10')[/cyan]",
+            "[cyan]Enter chapter range (e.g., '1-10', '1,3,5-10', or leave empty for all)[/cyan]",
             default=""
         )
+
+        if not chapters:
+            print("[yellow]No chapter range specified - will prompt to download all chapters[/yellow]")
 
         # Ask for bundle option
         bundle_choice = Prompt.ask(
