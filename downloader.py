@@ -632,8 +632,19 @@ def download_annas_archive_browser(md5, title, download_dir=None):
         print(f"[red]✗ Browser automation failed: {e}[/red]")
         return False
 
-def download_file_ia(ia_id, filename_on_server, title):
+def sanitize_folder_name(name):
+    """Sanitize a name for use as a folder name"""
+    # Remove invalid characters for folder names
+    sanitized = "".join(c for c in name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+    sanitized = sanitized.replace(" ", "_")[:100]
+    return sanitized
+
+def download_file_ia(ia_id, filename_on_server, title, download_dir=None):
     """Download a file from Internet Archive with proper authentication"""
+    # Use current directory if not specified
+    if download_dir is None:
+        download_dir = os.getcwd()
+
     print(f"[cyan]Attempting Internet Archive download with browser simulation...[/cyan]")
 
     # Clean up the title for local filename
@@ -645,6 +656,7 @@ def download_file_ia(ia_id, filename_on_server, title):
     if not ext or ext.lower() not in ['.epub', '.pdf', '.txt', '.mobi', '.azw3']:
         ext = ".epub"
     local_filename += ext
+    filepath = os.path.join(download_dir, local_filename)
 
     try:
         # Step 1: Visit the item page first (like a human would)
@@ -668,7 +680,7 @@ def download_file_ia(ia_id, filename_on_server, title):
             downloaded = 0
 
             print(f"[green]Downloading:[/green] {local_filename}")
-            with open(local_filename, 'wb') as f:
+            with open(filepath, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
                     downloaded += len(chunk)
@@ -676,7 +688,7 @@ def download_file_ia(ia_id, filename_on_server, title):
                         percent = (downloaded / total_size) * 100
                         print(f"Progress: {percent:.1f}%", end='\r')
 
-        print(f"\n[bold green]✓ Successfully downloaded to {local_filename}[/bold green]")
+        print(f"\n[bold green]✓ Successfully downloaded to {filepath}[/bold green]")
         return True
 
     except requests.exceptions.HTTPError as e:
@@ -686,17 +698,21 @@ def download_file_ia(ia_id, filename_on_server, title):
             print(f"[yellow]Try manually visiting: {item_page_url}[/yellow]")
         else:
             print(f"\n[red]✗ Download failed: {e}[/red]")
-        if os.path.exists(local_filename):
-            os.remove(local_filename)
+        if os.path.exists(filepath):
+            os.remove(filepath)
         return False
     except Exception as e:
         print(f"\n[red]✗ Download failed: {e}[/red]")
-        if os.path.exists(local_filename):
-            os.remove(local_filename)
+        if os.path.exists(filepath):
+            os.remove(filepath)
         return False
 
-def download_file(url, title):
+def download_file(url, title, download_dir=None):
     """Download a book file"""
+    # Use current directory if not specified
+    if download_dir is None:
+        download_dir = os.getcwd()
+
     # Handle string URLs (simple downloads)
     if isinstance(url, str):
         filename = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
@@ -710,6 +726,7 @@ def download_file(url, title):
             ext = ".epub"
 
         filename += ext
+        filepath = os.path.join(download_dir, filename)
 
         print(f"[green]Downloading:[/green] {filename}")
         try:
@@ -719,24 +736,24 @@ def download_file(url, title):
                 r.raise_for_status()
                 total_size = int(r.headers.get('content-length', 0))
                 downloaded = 0
-                with open(filename, 'wb') as f:
+                with open(filepath, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
                         downloaded += len(chunk)
                         if total_size > 0:
                             percent = (downloaded / total_size) * 100
                             print(f"Progress: {percent:.1f}%", end='\r')
-            print(f"\n[bold green]✓ Saved to {filename}[/bold green]")
+            print(f"\n[bold green]✓ Saved to {filepath}[/bold green]")
             return True
         except Exception as e:
             print(f"\n[red]✗ Download failed: {e}[/red]")
-            if os.path.exists(filename):
-                os.remove(filename)
+            if os.path.exists(filepath):
+                os.remove(filepath)
             return False
 
     # Handle dict URLs (Internet Archive special handling)
     elif isinstance(url, dict) and url.get('needs_ia_handling'):
-        return download_file_ia(url['ia_id'], url['filename'], title)
+        return download_file_ia(url['ia_id'], url['filename'], title, download_dir)
 
     # Handle dict URLs (Anna's Archive special handling)
     elif isinstance(url, dict) and url.get('needs_annas_handling'):
@@ -745,7 +762,7 @@ def download_file(url, title):
 
         # Try browser automation first if Playwright is available
         if PLAYWRIGHT_AVAILABLE:
-            return download_annas_archive_browser(md5, title)
+            return download_annas_archive_browser(md5, title, download_dir)
 
         # Fallback to manual instructions if Playwright not available
         print(f"[cyan]Attempting Anna's Archive multi-step download...[/cyan]")
@@ -944,9 +961,17 @@ def calculate_relevance(query, title):
 
     return 0
 
-def handle_book_download(book_title):
+def handle_book_download(book_title, download_dir=None):
     """Handle book search and download"""
+    # Create folder based on search term if not specified
+    if download_dir is None:
+        download_dir = os.path.join(os.getcwd(), sanitize_folder_name(book_title))
+
+    # Create the download directory if it doesn't exist
+    os.makedirs(download_dir, exist_ok=True)
+
     print(f"\n[bold cyan]Searching for book: {book_title}[/bold cyan]\n")
+    print(f"[dim]Downloads will be saved to: {download_dir}[/dim]\n")
 
     # Search all sources - Anna's Archive first as it has the most comprehensive collection
     all_results = (
@@ -1004,7 +1029,7 @@ def handle_book_download(book_title):
         else:
             print(f"[blue]Download URL:[/blue] {url}\n")
 
-        success = download_file(url, selected["title"])
+        success = download_file(url, selected["title"], download_dir)
 
         # If download failed, suggest alternatives
         if not success and len(top_results) > 1:
@@ -1350,9 +1375,21 @@ def get_mangadex_chapter_info(manga_url, language='en'):
     except Exception as e:
         return None
 
-def download_manga(url, chapters=None, bundle=False, language=None, english_only=False):
+def download_manga(url, chapters=None, bundle=False, language=None, english_only=False, download_dir=None):
     """Download manga using the manga-downloader binary"""
-    cmd = ["./manga-downloader"]
+    # Save current directory and change to download directory
+    original_dir = os.getcwd()
+
+    # Get the absolute path to the manga-downloader binary
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    manga_downloader_path = os.path.join(script_dir, "manga-downloader")
+
+    if download_dir:
+        os.makedirs(download_dir, exist_ok=True)
+        os.chdir(download_dir)
+        print(f"[dim]Downloads will be saved to: {download_dir}[/dim]\n")
+
+    cmd = [manga_downloader_path]
 
     # Add flags first (before URL and chapters)
     # Add language filter
@@ -1412,14 +1449,26 @@ def download_manga(url, chapters=None, bundle=False, language=None, english_only
             print(f"  • Try without specifying chapters to download all available")
             print(f"  • Try a different result from the search (e.g., non-colored version)")
             print(f"  • Use the manga URL directly with './manga-downloader {url}'")
+        # Restore original directory before exiting
+        if download_dir:
+            os.chdir(original_dir)
         sys.exit(1)
     except FileNotFoundError:
         print("[red]Error: manga-downloader binary not found in current directory[/red]")
         print("[yellow]Make sure you're running this script from the BookDownloader directory[/yellow]")
+        # Restore original directory before exiting
+        if download_dir:
+            os.chdir(original_dir)
         sys.exit(1)
+    finally:
+        # Always restore original directory
+        if download_dir:
+            os.chdir(original_dir)
 
-def handle_manga_download(url=None, chapters=None, bundle=False, language=None, english_only=False, interactive=False, search_mode=False, search_query=None):
+def handle_manga_download(url=None, chapters=None, bundle=False, language=None, english_only=False, interactive=False, search_mode=False, search_query=None, download_dir=None):
     """Handle manga download"""
+    manga_title = None  # Track manga title for folder creation
+
     if interactive or not url or search_mode:
         print("\n[bold cyan]Manga Download - Interactive Mode[/bold cyan]\n")
 
@@ -1428,6 +1477,7 @@ def handle_manga_download(url=None, chapters=None, bundle=False, language=None, 
             if not search_query:
                 search_query = Prompt.ask("[cyan]Enter manga title to search[/cyan]")
 
+            manga_title = search_query  # Save for folder creation
             results = search_all_manga_sites(search_query)
 
             if not results:
@@ -1527,12 +1577,17 @@ def handle_manga_download(url=None, chapters=None, bundle=False, language=None, 
             language = None
             english_only = False
 
+    # Create download directory based on manga title or search query
+    if download_dir is None and manga_title:
+        download_dir = os.path.join(os.getcwd(), sanitize_folder_name(manga_title))
+
     download_manga(
         url,
         chapters if chapters else None,
         bundle,
         language if language else None,
-        english_only
+        english_only,
+        download_dir
     )
 
 # ============== MAIN ==============
