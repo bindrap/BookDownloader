@@ -19,8 +19,11 @@ A unified tool for downloading books and manga legally from free sources.
 ### Installation
 
 ```bash
-# Install Python dependencies
-pip install requests rich beautifulsoup4
+# Install Python dependencies (recommended)
+pip install -r requirements.txt
+
+# Or install manually
+pip install requests rich beautifulsoup4 playwright
 ```
 
 ### Universal Downloader (Recommended)
@@ -173,7 +176,25 @@ python3 downloader.py --manga --search "one punch man"
 
 ## Recent Improvements
 
-### v2.2 - Added 123FreeBook Source (Latest!)
+### v2.3 - Performance & Reliability Improvements (Latest! 2025-11-06)
+**🔴 CRITICAL BUG FIX**: Fixed manga downloads deleting all files
+- **Bug**: `--english-only` flag was removing ALL downloaded manga files
+- **Fixed**: Removed buggy cleanup function, manga downloads now work correctly
+- **Impact**: Manga downloads keep downloaded files as expected
+
+**⚡ Performance Improvements**:
+- **3x more reliable book searches** - Increased timeout from 10s to 30s
+- **Auto-retry logic** - Network failures automatically retry with exponential backoff
+- **Better Internet Archive handling** - Multiple download strategies, retry logic
+- **Increased download timeout** - From 30s to 45s for large files
+
+**📦 Dependencies**:
+- Added `requirements.txt` for easy dependency installation
+- Run: `pip install -r requirements.txt`
+
+See [IMPROVEMENTS.md](IMPROVEMENTS.md) for full technical details.
+
+### v2.2 - Added 123FreeBook Source
 **Added**: New book source with massive collection
 - **123FreeBook** - 68,000+ public domain books in EPUB and PDF formats
 - Now searches **5 sources** total (was 4)

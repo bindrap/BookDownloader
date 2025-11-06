@@ -74,7 +74,7 @@ def search_gutendex(query):
     """Search Project Gutenberg"""
     print("[bold blue]Searching Project Gutenberg...[/bold blue]")
     try:
-        response = requests.get(GUTENDEX_API + requests.utils.quote(query), timeout=10)
+        response = requests.get(GUTENDEX_API + requests.utils.quote(query), timeout=30)
         response.raise_for_status()
         results = response.json().get("results", [])
         return [{
@@ -91,7 +91,7 @@ def search_openlibrary(query):
     """Search Open Library / Internet Archive"""
     print("[bold blue]Searching Open Library...[/bold blue]")
     try:
-        response = requests.get(OPENLIBRARY_API + requests.utils.quote(query), timeout=10)
+        response = requests.get(OPENLIBRARY_API + requests.utils.quote(query), timeout=30)
         response.raise_for_status()
         results = response.json().get("docs", [])
         openlibrary_results = []
@@ -640,12 +640,12 @@ def sanitize_folder_name(name):
     return sanitized
 
 def download_file_ia(ia_id, filename_on_server, title, download_dir=None):
-    """Download a file from Internet Archive with proper authentication"""
+    """Download a file from Internet Archive with retry logic"""
     # Use current directory if not specified
     if download_dir is None:
         download_dir = os.getcwd()
 
-    print(f"[cyan]Attempting Internet Archive download with browser simulation...[/cyan]")
+    print(f"[cyan]Attempting Internet Archive download...[/cyan]")
 
     # Clean up the title for local filename
     local_filename = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
@@ -658,54 +658,96 @@ def download_file_ia(ia_id, filename_on_server, title, download_dir=None):
     local_filename += ext
     filepath = os.path.join(download_dir, local_filename)
 
-    try:
-        # Step 1: Visit the item page first (like a human would)
-        item_page_url = f"https://archive.org/details/{ia_id}"
-        print(f"[dim]Step 1: Visiting book page...[/dim]")
-        session.get(item_page_url, timeout=10)
-        time.sleep(0.5)  # Brief delay like human browsing
+    item_page_url = f"https://archive.org/details/{ia_id}"
 
-        # Step 2: Try direct download with referer
-        download_url = f"https://archive.org/download/{ia_id}/{filename_on_server}"
-        print(f"[dim]Step 2: Initiating download...[/dim]")
-
-        headers = {
-            'Referer': item_page_url,
-            'Accept': 'application/epub+zip,application/pdf,*/*',
+    # Try multiple download strategies with retry logic
+    strategies = [
+        {
+            'name': 'Direct download',
+            'url': f"https://archive.org/download/{ia_id}/{filename_on_server}",
+            'headers': {
+                'Referer': item_page_url,
+                'Accept': 'application/epub+zip,application/pdf,*/*',
+            }
+        },
+        {
+            'name': 'Archive.org serve endpoint',
+            'url': f"https://archive.org/serve/{ia_id}/{filename_on_server}",
+            'headers': {
+                'Referer': item_page_url,
+            }
         }
+    ]
 
-        with session.get(download_url, stream=True, timeout=30, headers=headers) as r:
-            r.raise_for_status()
-            total_size = int(r.headers.get('content-length', 0))
-            downloaded = 0
+    for strategy in strategies:
+        print(f"[dim]Trying: {strategy['name']}...[/dim]")
 
-            print(f"[green]Downloading:[/green] {local_filename}")
-            with open(filepath, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        percent = (downloaded / total_size) * 100
-                        print(f"Progress: {percent:.1f}%", end='\r')
+        # Retry logic: 3 attempts with exponential backoff
+        for attempt in range(3):
+            try:
+                # Visit item page first (like a human would)
+                if attempt == 0:
+                    session.get(item_page_url, timeout=15)
+                    time.sleep(0.5)
 
-        print(f"\n[bold green]✓ Successfully downloaded to {filepath}[/bold green]")
-        return True
+                with session.get(strategy['url'], stream=True, timeout=45, headers=strategy['headers']) as r:
+                    r.raise_for_status()
+                    total_size = int(r.headers.get('content-length', 0))
+                    downloaded = 0
 
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            print(f"\n[red]✗ 401 Unauthorized - Internet Archive requires authentication[/red]")
-            print(f"[yellow]This book may require borrowing/lending on archive.org[/yellow]")
-            print(f"[yellow]Try manually visiting: {item_page_url}[/yellow]")
-        else:
-            print(f"\n[red]✗ Download failed: {e}[/red]")
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        return False
-    except Exception as e:
-        print(f"\n[red]✗ Download failed: {e}[/red]")
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        return False
+                    print(f"[green]Downloading:[/green] {local_filename}")
+                    with open(filepath, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                print(f"Progress: {percent:.1f}%", end='\r')
+
+                print(f"\n[bold green]✓ Successfully downloaded to {filepath}[/bold green]")
+                return True
+
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 401:
+                    # 401 error - this book requires authentication
+                    break  # No point retrying, move to next strategy or fail
+                elif e.response.status_code == 403:
+                    # 403 Forbidden - might be temporary
+                    if attempt < 2:
+                        wait_time = 2 ** attempt  # 1s, 2s
+                        print(f"[yellow]Forbidden, retrying in {wait_time}s...[/yellow]")
+                        time.sleep(wait_time)
+                        continue
+                    break
+                elif e.response.status_code == 503:
+                    # 503 Service Unavailable - temporary issue
+                    if attempt < 2:
+                        wait_time = 2 ** attempt
+                        print(f"[yellow]Service unavailable, retrying in {wait_time}s...[/yellow]")
+                        time.sleep(wait_time)
+                        continue
+                    break
+                else:
+                    break  # Other HTTP errors, don't retry
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                if attempt < 2:
+                    wait_time = 2 ** attempt
+                    print(f"[yellow]Network error, retrying in {wait_time}s...[/yellow]")
+                    time.sleep(wait_time)
+                    continue
+                break
+            except Exception as e:
+                break  # Unknown error, don't retry
+
+    # All strategies failed
+    print(f"\n[red]✗ All download attempts failed[/red]")
+    print(f"[yellow]This book may require borrowing/lending on archive.org[/yellow]")
+    print(f"[yellow]Or it may not be freely available for download[/yellow]")
+    print(f"[cyan]Try manually visiting: {item_page_url}[/cyan]")
+
+    if os.path.exists(filepath):
+        os.remove(filepath)
+    return False
 
 def download_file(url, title, download_dir=None):
     """Download a book file"""
@@ -713,7 +755,7 @@ def download_file(url, title, download_dir=None):
     if download_dir is None:
         download_dir = os.getcwd()
 
-    # Handle string URLs (simple downloads)
+    # Handle string URLs (simple downloads with retry logic)
     if isinstance(url, str):
         filename = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
         filename = filename.replace(" ", "_")[:100]
@@ -729,27 +771,40 @@ def download_file(url, title, download_dir=None):
         filepath = os.path.join(download_dir, filename)
 
         print(f"[green]Downloading:[/green] {filename}")
-        try:
-            # Add referer header for better compatibility
-            headers = {'Referer': url.rsplit('/', 1)[0] + '/'}
-            with session.get(url, stream=True, timeout=30, headers=headers) as r:
-                r.raise_for_status()
-                total_size = int(r.headers.get('content-length', 0))
-                downloaded = 0
-                with open(filepath, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            percent = (downloaded / total_size) * 100
-                            print(f"Progress: {percent:.1f}%", end='\r')
-            print(f"\n[bold green]✓ Saved to {filepath}[/bold green]")
-            return True
-        except Exception as e:
-            print(f"\n[red]✗ Download failed: {e}[/red]")
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            return False
+
+        # Retry logic: 3 attempts with exponential backoff
+        for attempt in range(3):
+            try:
+                # Add referer header for better compatibility
+                headers = {'Referer': url.rsplit('/', 1)[0] + '/'}
+                with session.get(url, stream=True, timeout=45, headers=headers) as r:
+                    r.raise_for_status()
+                    total_size = int(r.headers.get('content-length', 0))
+                    downloaded = 0
+                    with open(filepath, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                print(f"Progress: {percent:.1f}%", end='\r')
+                print(f"\n[bold green]✓ Saved to {filepath}[/bold green]")
+                return True
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                if attempt < 2:
+                    wait_time = 2 ** attempt
+                    print(f"\n[yellow]Network error, retrying in {wait_time}s... (attempt {attempt + 2}/3)[/yellow]")
+                    time.sleep(wait_time)
+                    continue
+                print(f"\n[red]✗ Download failed after 3 attempts: {e}[/red]")
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                return False
+            except Exception as e:
+                print(f"\n[red]✗ Download failed: {e}[/red]")
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                return False
 
     # Handle dict URLs (Internet Archive special handling)
     elif isinstance(url, dict) and url.get('needs_ia_handling'):
@@ -1415,17 +1470,14 @@ def download_manga(url, chapters=None, bundle=False, language=None, english_only
     try:
         subprocess.run(cmd, check=True)
 
-        # Clean up non-English files if requested (safety net - shouldn't be needed with --language en)
-        if english_only:
-            print("\n[bold cyan]Verifying English-only download...[/bold cyan]")
-            english_count, removed_count = cleanup_non_english_manga()
-            if removed_count > 0:
-                print(f"\n[bold yellow]⚠ Found and removed {removed_count} non-English file(s) (this shouldn't happen)[/bold yellow]")
-                print(f"[bold green]✓ Kept {english_count} English file(s)[/bold green]")
-            elif english_count > 0:
-                print(f"\n[bold green]✓ All {english_count} file(s) are English - download successful[/bold green]")
-            else:
-                print("\n[bold yellow]⚠ No files found[/bold yellow]")
+        # Verify download completed
+        cbz_files = glob.glob("*.cbz")
+        if cbz_files:
+            print(f"\n[bold green]✓ Successfully downloaded {len(cbz_files)} chapter(s)[/bold green]")
+            if english_only:
+                print(f"[dim]Language filter: English only[/dim]")
+        else:
+            print("\n[bold yellow]⚠ No files were downloaded[/bold yellow]")
 
         # Always deduplicate chapters (remove duplicate versions of the same chapter)
         print("\n[bold cyan]Checking for duplicate chapter versions...[/bold cyan]")
