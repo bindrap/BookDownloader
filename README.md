@@ -26,6 +26,21 @@ pip install -r requirements.txt
 pip install requests rich beautifulsoup4 playwright
 ```
 
+### ⚠️ Important: Public Domain Only
+
+This tool downloads from **legal, free sources** - mainly public domain books. Books are typically in the public domain if:
+- Published before 1928 in the US
+- Author died 70+ years ago (varies by country)
+
+**Examples that work** (public domain):
+- Pride and Prejudice, Moby Dick, Frankenstein
+- Alice's Adventures in Wonderland, The Adventures of Tom Sawyer
+- Any Jane Austen, Charles Dickens, Mark Twain books
+
+**Examples that DON'T work** (copyrighted):
+- Life of Pi (2001), Harry Potter series, recent bestsellers
+- Any book published after 1928 (with rare exceptions)
+
 ### Universal Downloader (Recommended)
 
 The easiest way to download both books and manga using a single script:
@@ -66,10 +81,17 @@ python3 downloader.py --manga --list
 
 ## Contents
 
+### Scripts
 1. **downloader.py** (Recommended) - Unified script for books and manga
 2. **book_downloader.py** - Standalone book downloader
 3. **manga_helper.py** - Standalone manga helper
 4. **manga-downloader** - Binary for direct manga downloads
+
+### Documentation
+- **[SUMMARY.md](SUMMARY.md)** - User-friendly overview of recent improvements
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Comprehensive troubleshooting guide
+- **[IMPROVEMENTS.md](IMPROVEMENTS.md)** - Technical details of all fixes
+- **[README.md](README.md)** (this file) - Main documentation
 
 ## Usage Examples
 
