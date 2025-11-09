@@ -439,8 +439,10 @@ def download_annas_archive_browser(md5, title, download_dir=None):
 
     try:
         with sync_playwright() as p:
-            # Launch browser - use headless mode
-            browser = p.chromium.launch(headless=True)
+            # Launch browser - use headful mode (visible) to avoid DDoS-Guard detection
+            # Headless browsers are easily detected by anti-bot systems
+            print(f"[dim]Note: Browser window will open briefly for verification[/dim]")
+            browser = p.chromium.launch(headless=False)
             context = browser.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 viewport={'width': 1920, 'height': 1080},
@@ -453,13 +455,13 @@ def download_annas_archive_browser(md5, title, download_dir=None):
             page.goto(book_url, wait_until='networkidle', timeout=30000)
 
             # Wait for the page to fully load (DDoS-Guard check may appear)
-            time.sleep(2)
+            time.sleep(3)
 
             # Step 2: Look for slow download links
             print(f"[dim]Step 2: Finding slow download link...[/dim]")
             try:
                 # Wait for slow download section to be visible
-                page.wait_for_selector('a[href^="/slow_download/"]', timeout=10000)
+                page.wait_for_selector('a[href^="/slow_download/"]', timeout=15000)
                 slow_links = page.query_selector_all('a[href^="/slow_download/"]')
 
                 if not slow_links:
@@ -479,15 +481,15 @@ def download_annas_archive_browser(md5, title, download_dir=None):
                 # Wait for that refresh to happen
                 initial_url = page.url
 
-                # Wait up to 20 seconds for either:
+                # Wait up to 30 seconds for either:
                 # 1. URL to change (redirect to partner)
                 # 2. Page to reload/refresh (same URL but new content)
                 # 3. Download link to appear
                 try:
-                    print(f"[dim]Waiting for page to refresh (typically 5-10 seconds)...[/dim]")
+                    print(f"[dim]Waiting for page to refresh (typically 5-15 seconds)...[/dim]")
 
                     # Strategy: Wait for either URL change OR for download link to appear
-                    for i in range(20):
+                    for i in range(30):
                         time.sleep(1)
                         current_url = page.url
 
@@ -1048,10 +1050,28 @@ def handle_book_download(book_title, download_dir=None):
         score = calculate_relevance(book_title, result['title'])
         if score > 0:  # Only keep results with some relevance
             result['relevance'] = score
+
+            # Deprioritize Anna's Archive (strong anti-bot protection)
+            # Other sources like Gutenberg, Standard Ebooks work better
+            if result['source'] == "Anna's Archive":
+                result['relevance'] -= 5  # Slight penalty
+
             scored_results.append(result)
 
-    # Sort by relevance (highest first)
-    scored_results.sort(key=lambda x: x['relevance'], reverse=True)
+    # Sort by relevance (highest first), then by source reliability
+    # This ensures Gutenberg, Standard Ebooks appear before Anna's Archive
+    source_priority = {
+        "Gutenberg": 3,
+        "Standard Ebooks": 2,
+        "Feedbooks": 2,
+        "Internet Archive": 1,
+        "123FreeBook": 1,
+        "Anna's Archive": 0
+    }
+    scored_results.sort(
+        key=lambda x: (x['relevance'], source_priority.get(x['source'], 0)),
+        reverse=True
+    )
 
     # Limit to top 15 most relevant results
     top_results = scored_results[:15]
@@ -1089,12 +1109,24 @@ def handle_book_download(book_title, download_dir=None):
         # If download failed, suggest alternatives
         if not success and len(top_results) > 1:
             print("\n[yellow]Download failed. Here are your options:[/yellow]")
-            if selected['source'] == 'Internet Archive':
+            if selected['source'] == "Anna's Archive":
+                print("[yellow]Anna's Archive has strong anti-bot protection (DDoS-Guard)[/yellow]")
+                print("[yellow]Browser automation often fails with their security.[/yellow]")
+                print(f"\n[cyan]Recommended: Try these alternative sources instead:[/cyan]")
+                # Show non-Anna's Archive alternatives
+                alternatives = [r for r in top_results if r['source'] != "Anna's Archive"]
+                for idx, result in enumerate(alternatives[:5]):
+                    original_idx = top_results.index(result)
+                    print(f"   [{original_idx}] {result['title']} - [green]{result['source']}[/green]")
+                if not alternatives:
+                    print("\n[dim]No alternatives found. You may need to download manually from:[/dim]")
+                    print(f"[dim]{url.get('url') if isinstance(url, dict) else url}[/dim]")
+            elif selected['source'] == 'Internet Archive':
                 print("[yellow]1. Internet Archive books may require borrowing/authentication[/yellow]")
                 print("[yellow]2. Many are blocked on work/school networks[/yellow]")
                 print(f"[yellow]3. Try other sources from the {len(top_results)} results above:[/yellow]")
                 for idx, result in enumerate(top_results):
-                    if result['source'] != 'Internet Archive':
+                    if result['source'] not in ['Internet Archive', "Anna's Archive"]:
                         print(f"   [{idx}] {result['title']} - [green]{result['source']}[/green]")
             else:
                 print("[yellow]Try selecting a different result from the search results above.[/yellow]")
@@ -1468,7 +1500,7 @@ def download_manga(url, chapters=None, bundle=False, language=None, english_only
     print(f"\n[bold cyan]Running:[/bold cyan] {' '.join(cmd)}\n")
 
     try:
-        subprocess.run(cmd, check=True)
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
 
         # Verify download completed
         cbz_files = glob.glob("*.cbz")
@@ -1477,7 +1509,21 @@ def download_manga(url, chapters=None, bundle=False, language=None, english_only
             if english_only:
                 print(f"[dim]Language filter: English only[/dim]")
         else:
-            print("\n[bold yellow]⚠ No files were downloaded[/bold yellow]")
+            print("\n[bold red]✗ No files were downloaded[/bold red]")
+            print("\n[yellow]Possible reasons:[/yellow]")
+            print("  1. [yellow]Network/firewall blocking manga site[/yellow]")
+            print("  2. [yellow]Chapters don't exist in the requested language[/yellow]")
+            print("  3. [yellow]The manga site changed its structure[/yellow]")
+            print("  4. [yellow]manga-downloader binary may need updating[/yellow]")
+            print("\n[cyan]Troubleshooting:[/cyan]")
+            print("  • Try a different manga from the search results")
+            print("  • Try without --english-only to see all languages")
+            print("  • Check if you can access the manga URL in a browser")
+            print("  • Try on a different network (home WiFi vs mobile hotspot)")
+            if 'mangadex.org' in url:
+                print("\n[dim]For MangaDex:[/dim]")
+                print("  • MangaDex requires internet access without firewall restrictions")
+                print("  • Try: https://mangadex.org directly in browser to check access")
 
         # Always deduplicate chapters (remove duplicate versions of the same chapter)
         print("\n[bold cyan]Checking for duplicate chapter versions...[/bold cyan]")
